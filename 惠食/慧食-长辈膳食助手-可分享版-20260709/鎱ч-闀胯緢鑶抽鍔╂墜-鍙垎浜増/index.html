@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#f6e4d8" />
+    <title>慧食·长辈膳食助手</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <svg class="icon-sprite" aria-hidden="true">
+      <symbol id="i-home" viewBox="0 0 24 24"><path d="M3 10.8 12 3l9 7.8v9.7a1.5 1.5 0 0 1-1.5 1.5h-5v-6h-5v6h-5A1.5 1.5 0 0 1 3 20.5z"/></symbol>
+      <symbol id="i-mic" viewBox="0 0 24 24"><path d="M12 14a4 4 0 0 0 4-4V6a4 4 0 0 0-8 0v4a4 4 0 0 0 4 4z"/><path d="M19 10a7 7 0 0 1-14 0"/><path d="M12 17v4"/><path d="M8 21h8"/></symbol>
+      <symbol id="i-camera" viewBox="0 0 24 24"><path d="M4 8.5A2.5 2.5 0 0 1 6.5 6h1.8l1.2-2h5l1.2 2h1.8A2.5 2.5 0 0 1 21 8.5v9A2.5 2.5 0 0 1 18.5 20h-12A2.5 2.5 0 0 1 4 17.5z"/><path d="M12.5 16a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z"/></symbol>
+      <symbol id="i-user" viewBox="0 0 24 24"><path d="M12 12a4.5 4.5 0 1 0 0-9 4.5 4.5 0 0 0 0 9z"/><path d="M4 21a8 8 0 0 1 16 0"/></symbol>
+      <symbol id="i-chart" viewBox="0 0 24 24"><path d="M4 20h16"/><path d="M7 17V9"/><path d="M12 17V5"/><path d="M17 17v-6"/></symbol>
+      <symbol id="i-family" viewBox="0 0 24 24"><path d="M9 11a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z"/><path d="M17 12a3 3 0 1 0 0-6"/><path d="M3 21a6 6 0 0 1 12 0"/><path d="M14.5 18.5A5 5 0 0 1 21 21"/></symbol>
+      <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14"/><path d="M5 12h14"/></symbol>
+      <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12.5 4.2 4.2L19 7"/></symbol>
+      <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 3 22 20H2z"/><path d="M12 9v5"/><path d="M12 17h.01"/></symbol>
+      <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12"/><path d="M18 6 6 18"/></symbol>
+      <symbol id="i-calendar" viewBox="0 0 24 24"><path d="M5 5h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z"/><path d="M8 3v4"/><path d="M16 3v4"/><path d="M3 10h18"/></symbol>
+      <symbol id="i-volume" viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9z"/><path d="M17 9a4 4 0 0 1 0 6"/><path d="M19.5 6.5a8 8 0 0 1 0 11"/></symbol>
+      <symbol id="i-pause" viewBox="0 0 24 24"><path d="M8 5v14"/><path d="M16 5v14"/></symbol>
+      <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></symbol>
+      <symbol id="i-minus" viewBox="0 0 24 24"><path d="M5 12h14"/></symbol>
+    </svg>
+
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand-block">
+          <p class="eyebrow" id="modeLabel">长辈端</p>
+          <h1 class="brand-logo" aria-label="慧食">
+            <span class="brand-mark" aria-hidden="true">
+              <img class="brand-icon" src="./assets/logo.png" alt="" />
+            </span>
+            <span class="brand-word">慧食</span>
+          </h1>
+        </div>
+        <button class="mode-button" id="modeSwitch" type="button">切换身份</button>
+      </header>
+
+      <main id="main" tabindex="-1">
+        <section class="screen is-active auth-screen" id="screen-login" aria-labelledby="loginTitle">
+          <div class="login-hero">
+            <span class="login-logo" aria-hidden="true">
+              <img src="./assets/logo.png" alt="" />
+            </span>
+            <p class="eyebrow">慧食</p>
+            <h2 id="loginTitle">先选择使用身份</h2>
+            <p>当前为本机封闭试用，数据不会自动同步到其他设备。</p>
+          </div>
+
+          <form class="auth-card" id="authForm">
+            <fieldset class="auth-role-field">
+              <legend>选择身份</legend>
+              <div class="role-grid">
+                <label class="role-card is-active">
+                  <input type="radio" name="authRole" value="elder" checked />
+                  <span><svg><use href="#i-user"></use></svg></span>
+                  <strong>我是长辈</strong>
+                  <small>记录饮食，拍照问一问</small>
+                </label>
+                <label class="role-card">
+                  <input type="radio" name="authRole" value="family" />
+                  <span><svg><use href="#i-family"></use></svg></span>
+                  <strong>我是家人</strong>
+                  <small>查看本机记录，协助建档案</small>
+                </label>
+              </div>
+            </fieldset>
+
+            <label class="auth-label" for="authName">姓名或昵称
+              <input id="authName" type="text" autocomplete="name" placeholder="例如：妈妈、女儿" />
+            </label>
+            <button class="consent-row consent-toggle" id="privacyConsent" type="button" role="checkbox" aria-checked="false">
+              <span class="consent-check" aria-hidden="true"><svg><use href="#i-check"></use></svg></span>
+              <span>我已了解：只有主动进行语音、文字或照片分析时，对应输入与所填健康档案才会发送给当前配置的 AI 服务；本机试用不提供真实登录或跨设备家庭同步。</span>
+            </button>
+            <button class="primary-button auth-submit" id="authSubmit" type="submit">进入长辈端</button>
+            <p class="auth-helper" id="authHelper">长辈端用于语音记餐、拍照问一问和查看本机提醒。</p>
+            <button class="text-button clear-local-data" id="clearLocalData" type="button">清除本机全部数据</button>
+          </form>
+        </section>
+
+        <section class="screen" id="screen-home" aria-labelledby="homeTitle">
+          <div class="hero-card">
+            <div class="hero-copy">
+              <p class="eyebrow">今日餐桌提醒</p>
+              <h2 id="homeTitle">吃之前，先问一句</h2>
+              <p>红色先停下，黄色少一点，绿色也要核对实际配料。</p>
+            </div>
+            <div class="hero-plate" aria-hidden="true">
+              <span></span><span></span><span></span>
+            </div>
+          </div>
+
+          <div class="risk-strip" id="riskStrip"></div>
+          <div class="quick-grid">
+            <button class="quick-card voice" type="button" data-go="voice">
+              <svg><use href="#i-mic"></use></svg>
+              <span>问一问</span>
+              <small>吃之前，说一句就行</small>
+            </button>
+            <button class="quick-card photo" type="button" data-go="photo">
+              <svg><use href="#i-camera"></use></svg>
+              <span>拍一拍</span>
+              <small>照片辅助判断红黄绿</small>
+            </button>
+          </div>
+
+          <section class="section-block">
+            <div class="section-title">
+              <h3>今日简报</h3>
+              <span id="todayRecordSummary">仅显示真实记录</span>
+            </div>
+            <div class="timeline-card" id="todayTimeline">
+              <div class="timeline-row">
+                <strong>早餐</strong>
+                <span>尚未记录</span>
+              </div>
+              <div class="timeline-row">
+                <strong>午餐</strong>
+                <span>尚未记录</span>
+              </div>
+              <div class="timeline-row muted">
+                <strong>晚餐</strong>
+                <span>还未记录</span>
+              </div>
+            </div>
+          </section>
+        </section>
+
+        <section class="screen" id="screen-profile" aria-labelledby="profileTitle">
+          <div class="screen-heading">
+            <h2 id="profileTitle">我的健康档案</h2>
+          </div>
+
+          <section class="profile-overview" id="profileOverview">
+            <div class="profile-card-grid" id="profileCards"></div>
+            <div class="profile-insight-stack" id="profileInsights"></div>
+          </section>
+
+          <form class="wizard" id="profileWizard" hidden>
+            <div class="wizard-head">
+              <p class="eyebrow" id="wizardKicker">第 1 步</p>
+              <h3 id="wizardTitle">先填写基础信息</h3>
+              <p id="wizardText">这些信息用于估算每日能量和身体指标。</p>
+              <div class="progress-dots" id="wizardProgress"></div>
+            </div>
+
+            <fieldset class="step-panel" data-step="basic">
+              <legend>基础信息</legend>
+              <label>年龄<input id="ageInput" type="number" min="45" max="110" inputmode="numeric" /></label>
+              <label>性别<select id="sexInput"><option value="female">女</option><option value="male">男</option></select></label>
+              <label>身高 cm<input id="heightInput" type="number" min="120" max="210" inputmode="decimal" /></label>
+              <label>体重 kg<input id="weightInput" type="number" min="35" max="130" inputmode="decimal" /></label>
+            </fieldset>
+
+            <fieldset class="step-panel" data-step="activity">
+              <legend>每天活动时间</legend>
+              <p class="hint">按一天累计活动时间选择，散步、买菜、做家务都算。</p>
+              <div class="choice-grid" id="activityChoices"></div>
+            </fieldset>
+
+            <fieldset class="step-panel" data-step="conditions">
+              <legend>慢病与饮食红线</legend>
+              <div class="choice-grid" id="conditionChoices"></div>
+              <div class="custom-block">
+                <label for="conditionCustomInput">其他疾病或医生交代</label>
+                <div class="add-row">
+                  <input id="conditionCustomInput" type="text" placeholder="例如：甲状腺、贫血、胃病" />
+                  <button class="icon-button" id="addCondition" type="button" aria-label="添加其他疾病"><svg><use href="#i-plus"></use></svg></button>
+                </div>
+                <div class="chip-list" id="customConditionChips"></div>
+              </div>
+            </fieldset>
+
+            <fieldset class="step-panel" data-step="allergy">
+              <legend>过敏或不耐受</legend>
+              <div class="add-row">
+                <input id="allergyInput" type="text" placeholder="例如：花生、乳糖、虾" />
+                <button class="icon-button" id="addAllergy" type="button" aria-label="添加过敏项"><svg><use href="#i-plus"></use></svg></button>
+              </div>
+              <div class="chip-list" id="allergyChips"></div>
+            </fieldset>
+
+            <fieldset class="step-panel" data-step="goals">
+              <legend>目标设定</legend>
+              <div class="choice-grid" id="goalChoices"></div>
+              <div class="custom-block">
+                <label for="goalCustomInput">其他目标</label>
+                <div class="add-row">
+                  <input id="goalCustomInput" type="text" placeholder="例如：改善睡眠、保护肾功能、增重" />
+                  <button class="icon-button" id="addGoal" type="button" aria-label="添加其他目标"><svg><use href="#i-plus"></use></svg></button>
+                </div>
+                <div class="chip-list" id="customGoalChips"></div>
+              </div>
+            </fieldset>
+
+            <fieldset class="step-panel" data-step="personal">
+              <legend>个性化注意事项</legend>
+              <label>医生交代或特殊情况<textarea id="personalInput" rows="4" placeholder="例如：最近胃口差、牙不好、医生说要低钾。"></textarea></label>
+              <label class="toggle-line"><input id="guardInput" type="checkbox" /> 开启本机家人视图</label>
+              <div class="share-code" id="shareCode"></div>
+            </fieldset>
+
+            <div class="wizard-actions">
+              <button class="secondary-button" id="stepBack" type="button">上一步</button>
+              <button class="primary-button" id="stepNext" type="button">下一步</button>
+              <button class="text-button" id="stepClose" type="button">返回</button>
+            </div>
+          </form>
+        </section>
+
+        <section class="screen" id="screen-voice" aria-labelledby="voiceTitle">
+          <div class="screen-heading">
+            <h2 id="voiceTitle">吃之前，先问一句</h2>
+          </div>
+          <div class="meal-mode-tabs" aria-label="饭前或饭后">
+            <button class="is-active" type="button" data-meal-mode="before">饭前 · 能不能吃</button>
+            <button type="button" data-meal-mode="after">饭后 · 记一记</button>
+          </div>
+          <section class="voice-card">
+            <div class="voice-recorder">
+              <button class="record-button" id="recordButton" type="button" aria-label="开始语音输入">
+                <svg><use href="#i-mic"></use></svg>
+              </button>
+              <strong id="recordLabel">点一下，开口说</strong>
+              <small id="recordHint">比如：“这碗热干面我能吃吗？”</small>
+            </div>
+            <p class="voice-mode-hint" id="voiceModeHint">没听清可以打字，或改一改。</p>
+            <label class="sr-label" for="voiceText">输入饭菜</label>
+            <textarea id="voiceText" rows="4" placeholder="这碗热干面我能吃吗？"></textarea>
+            <button class="primary-button" id="voiceAnalyze" type="button">帮我看看</button>
+          </section>
+          <section class="meal-confirm-card" id="voiceConfirm" hidden aria-live="polite"></section>
+          <section class="result-stack" id="voiceResult" aria-live="polite"></section>
+        </section>
+
+        <section class="screen" id="screen-photo" aria-labelledby="photoTitle">
+          <div class="screen-heading">
+            <h2 id="photoTitle">选饭菜照片</h2>
+          </div>
+          <section class="photo-card photo-picker-card">
+            <button class="album-picker" id="albumOpenButton" type="button" data-photo-picker="photoInput">
+              <span class="album-picker-icon" aria-hidden="true"><svg><use href="#i-camera"></use></svg></span>
+              <strong>打开手机相册</strong>
+              <small>选择手机里的饭菜照片</small>
+            </button>
+            <input class="photo-input" id="photoInput" type="file" accept="image/jpeg,image/png,image/webp" hidden />
+            <p class="hint" id="photoAccessHint">点击后会打开相册，选中照片后再给出饮食提醒。</p>
+            <div class="photo-preview" id="photoPreview"><span>还没有选择照片</span></div>
+            <button class="secondary-button photo-reset" id="photoReset" type="button" data-photo-picker="photoInput" hidden>重新选择照片</button>
+          </section>
+          <section class="result-stack" id="photoResult" aria-live="polite"></section>
+        </section>
+
+        <section class="screen" id="screen-report" aria-labelledby="reportTitle">
+          <div class="screen-heading">
+            <p class="eyebrow">饮食周报</p>
+            <h2 id="reportTitle">这周吃得稳不稳</h2>
+          </div>
+          <section class="calendar-card">
+            <div class="calendar-toolbar">
+              <button class="month-button" id="prevMonth" type="button" aria-label="查看上个月">‹</button>
+              <div>
+                <h3 id="calendarTitle">七月记录</h3>
+                <span>可按日查看</span>
+              </div>
+              <button class="month-button" id="nextMonth" type="button" aria-label="查看下个月">›</button>
+            </div>
+            <div class="calendar-grid" id="calendarGrid"></div>
+          </section>
+          <section class="soft-panel report-score-card">
+            <div class="score-row">
+              <strong id="selectedDayScore">--</strong>
+              <span id="selectedDayLabel">当天真实记录</span>
+            </div>
+            <div class="metric-grid">
+              <div><span>红色警告</span><strong id="selectedDayRed">0 次</strong></div>
+              <div><span>黄色提醒</span><strong id="selectedDayYellow">0 次</strong></div>
+            </div>
+            <p class="day-score-note" id="selectedDayNote">点击日历中的某一天，可查看当天真实记录。</p>
+          </section>
+        </section>
+
+        <section class="screen" id="screen-family" aria-label="家人健康监测">
+          <section class="family-hero" id="familyHero">
+            <div>
+              <span>本机家人视图</span>
+              <strong>健康档案 · 基础信息未完成</strong>
+              <small>尚无真实餐食记录</small>
+            </div>
+            <div class="score-badge">本机</div>
+          </section>
+          <div class="family-top-actions">
+            <button class="secondary-button family-action-button" id="bindFamily" type="button">家庭绑定说明</button>
+            <button class="secondary-button family-action-button" id="familyProfileHelp" type="button" data-family-action="profile">帮长辈完善档案</button>
+          </div>
+          <div class="family-grid" id="familyGrid">
+            <div class="mini-card green"><span>今日记录</span><strong>0 餐</strong></div>
+            <div class="mini-card red"><span>红色警告</span><strong>0 条</strong></div>
+            <div class="mini-card yellow"><span>黄色提醒</span><strong>0 次</strong></div>
+            <div class="mini-card blue"><span>待查看</span><strong>0 条</strong></div>
+          </div>
+          <section class="monitor-panel" id="familyMonitor">
+            <div class="section-title">
+              <h3>真实记录</h3>
+              <span>仅限本机</span>
+            </div>
+            <div class="monitor-empty">
+              <strong>还没有餐食记录</strong>
+              <span>完成一次确认后，这里才会出现数据。</span>
+            </div>
+            <button class="secondary-button" type="button" data-go="report">查看记录日历</button>
+          </section>
+        </section>
+      </main>
+
+      <nav class="bottom-nav" aria-label="主要导航">
+        <button class="is-active" type="button" data-screen="home" data-role="elder"><svg><use href="#i-home"></use></svg><span>首页</span></button>
+        <button type="button" data-screen="voice" data-role="elder"><svg><use href="#i-mic"></use></svg><span>问一问</span></button>
+        <button class="nav-main" type="button" data-screen="photo" data-role="elder" aria-label="拍照识别"><svg><use href="#i-camera"></use></svg><span>拍一拍</span></button>
+        <button type="button" data-screen="report" data-role="family"><svg><use href="#i-chart"></use></svg><span>周报</span></button>
+        <button type="button" data-screen="family" data-role="family"><svg><use href="#i-family"></use></svg><span>家人</span></button>
+        <button type="button" data-screen="profile" data-role="elder"><svg><use href="#i-user"></use></svg><span>档案</span></button>
+      </nav>
+    </div>
+
+    <div class="bind-modal" id="bindModal" hidden role="dialog" aria-modal="true" aria-labelledby="bindTitle">
+      <div class="bind-sheet">
+        <button class="modal-close" id="closeBindModal" type="button" aria-label="关闭家庭绑定说明"><svg><use href="#i-close"></use></svg></button>
+        <p class="eyebrow">功能状态</p>
+        <h2 id="bindTitle">家庭绑定尚未启用</h2>
+        <p class="bind-code" id="bindCodeText">当前为本机封闭试用</p>
+        <p class="bind-hint">家人视图只能读取这台设备上的记录。系统不会生成绑定码，也不会把健康档案或提醒同步到其他设备。</p>
+      </div>
+    </div>
+    <div class="meal-result-modal" id="mealResultModal" hidden role="dialog" aria-modal="true" aria-labelledby="mealResultTitle">
+      <div class="meal-result-sheet" id="mealResultSheet"></div>
+    </div>
+    <div class="toast" id="toast" hidden role="status" aria-live="polite"></div>
+    <script src="./app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,14 @@
+{
+  "name": "huishi-local-pilot",
+  "version": "0.2.0",
+  "private": true,
+  "description": "慧食长辈膳食助手本机封闭试用版",
+  "scripts": {
+    "start": "node server.js",
+    "check": "node --check app.js && node --check server.js",
+    "test": "node --test --test-isolation=none tests/*.test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
