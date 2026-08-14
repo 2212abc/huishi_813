@@ -1,6 +1,14 @@
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 const { after, before, test } = require("node:test");
+const authTestDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "huishi-auth-api-"));
+process.env.NODE_ENV = "test";
+process.env.AUTH_DB_PATH = path.join(authTestDirectory, "users.sqlite");
+process.env.AUTH_SECRET = "test-api-secret-with-more-than-thirty-two-characters";
 const {
+  closeAuthService,
   getLocalModelJsonContent,
   normalizeMealAnalysisJson,
   normalizeStatus,
@@ -22,8 +30,11 @@ before(async () => {
 });
 
 after(async () => {
-  if (!server.listening) return;
-  await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  if (server.listening) {
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+  closeAuthService();
+  fs.rmSync(authTestDirectory, { recursive: true, force: true });
 });
 
 test("only allowlisted frontend files are public", async () => {
@@ -56,6 +67,29 @@ test("status endpoint reports optional analysis capabilities without exposing co
     textAnalysis: false,
     speechRecognition: "browser",
   });
+});
+
+test("auth status is anonymous and never exposes server secrets", async () => {
+  const response = await fetch(`${baseUrl}/api/auth/status`);
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.authenticated, false);
+  assert.equal(body.user, null);
+  assert.deepEqual(body.config, { smsReady: false, identityReady: false, identityRequired: false });
+  assert.doesNotMatch(JSON.stringify(body), /test-api-secret/);
+});
+
+test("auth mutations require JSON and validate phone numbers", async () => {
+  const wrongContentType = await fetch(`${baseUrl}/api/auth/login`, { method: "POST", body: "phone=13800138000" });
+  assert.equal(wrongContentType.status, 415);
+
+  const invalidPhone = await fetch(`${baseUrl}/api/auth/sms/request`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ phone: "123", purpose: "register" }),
+  });
+  assert.equal(invalidPhone.status, 400);
+  assert.equal((await invalidPhone.json()).error, "invalid_phone");
 });
 
 test("AI status and confidence normalization fail closed", () => {

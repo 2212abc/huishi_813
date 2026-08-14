@@ -4,6 +4,7 @@ const os = require("os");
 const path = require("path");
 const { execFile } = require("child_process");
 const { promisify } = require("util");
+const { createAuthService, handleAuthRequest } = require("./auth");
 
 const ROOT = __dirname;
 loadEnvFile();
@@ -28,7 +29,25 @@ const WHISPER_MODEL = process.env.WHISPER_MODEL || "";
 const WHISPER_LIBRARY_PATH = process.env.WHISPER_LIBRARY_PATH || "";
 const FFMPEG_COMMAND = process.env.FFMPEG_COMMAND || "/usr/bin/ffmpeg";
 const execFileAsync = promisify(execFile);
-const API_PATHS = new Set(["/api/status", "/api/transcribe-speech", "/api/analyze-photo", "/api/analyze-voice-meal", "/api/analyze-photo-meal"]);
+const AUTH_API_PATHS = new Set([
+  "/api/auth/status",
+  "/api/auth/me",
+  "/api/auth/sms/request",
+  "/api/auth/register",
+  "/api/auth/login",
+  "/api/auth/logout",
+  "/api/auth/password-reset/request",
+  "/api/auth/password-reset/confirm",
+  "/api/auth/identity/verify",
+]);
+const API_PATHS = new Set([
+  "/api/status",
+  "/api/transcribe-speech",
+  "/api/analyze-photo",
+  "/api/analyze-voice-meal",
+  "/api/analyze-photo-meal",
+  ...AUTH_API_PATHS,
+]);
 const PUBLIC_FILES = new Map([
   ["/", "index.html"],
   ["/index.html", "index.html"],
@@ -38,9 +57,11 @@ const PUBLIC_FILES = new Map([
 ]);
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX = Number(process.env.API_RATE_LIMIT || 30);
+const TRUST_PROXY = ["1", "true", "yes", "on"].includes(String(process.env.TRUST_PROXY || "").toLowerCase());
 const UPSTREAM_TIMEOUT_MS = Number(process.env.UPSTREAM_TIMEOUT_MS || 18_000);
 const rateLimits = new Map();
 let activeTranscriptions = 0;
+let authService = null;
 
 const TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -77,6 +98,15 @@ const server = http.createServer(async (req, res) => {
     if (!consumeRateLimit(req)) {
       res.setHeader("Retry-After", "60");
       sendJson(res, 429, { error: "rate_limited", message: "请求过于频繁，请稍后再试。" });
+      return;
+    }
+    if (AUTH_API_PATHS.has(pathname)) {
+      try {
+        await handleAuthRequest(getAuthService(), req, res, pathname, { getClientIp, sendJson, readJsonBody });
+      } catch (error) {
+        process.stderr.write(`[auth_startup] ${String(error?.message || error).slice(0, 180)}\n`);
+        sendJson(res, 503, { error: "auth_not_configured", message: "账号服务正在配置，请稍后再试。" });
+      }
       return;
     }
     if (pathname === "/api/status") handleStatus(req, res);
@@ -117,6 +147,17 @@ if (require.main === module) {
   });
 }
 
+function getAuthService() {
+  if (!authService) authService = createAuthService();
+  return authService;
+}
+
+function closeAuthService() {
+  if (!authService) return;
+  authService.close();
+  authService = null;
+}
+
 function sendJson(res, status, data) {
   res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
   res.end(JSON.stringify(data));
@@ -141,7 +182,7 @@ function isSameOriginRequest(req) {
 
 function consumeRateLimit(req) {
   const now = Date.now();
-  const key = req.socket.remoteAddress || "unknown";
+  const key = getClientIp(req);
   const current = rateLimits.get(key);
   if (!current || now - current.startedAt >= RATE_LIMIT_WINDOW_MS) {
     rateLimits.set(key, { startedAt: now, count: 1 });
@@ -149,6 +190,14 @@ function consumeRateLimit(req) {
   }
   current.count += 1;
   return current.count <= RATE_LIMIT_MAX;
+}
+
+function getClientIp(req) {
+  if (TRUST_PROXY) {
+    const forwarded = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim();
+    if (forwarded && forwarded.length <= 64) return forwarded;
+  }
+  return req.socket.remoteAddress || "unknown";
 }
 
 class HttpError extends Error {
@@ -950,6 +999,8 @@ function getLocalModelChatEndpoint() {
 }
 
 module.exports = {
+  closeAuthService,
+  getAuthService,
   getLocalModelJsonContent,
   server,
   normalizeMealAnalysisJson,

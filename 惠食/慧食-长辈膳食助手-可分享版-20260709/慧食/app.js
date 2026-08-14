@@ -168,6 +168,7 @@ const DEFAULT_STATE = {
     role: "elder",
     name: "",
     phone: "",
+    identityStatus: "unverified",
   },
   ui: {
     fontSize: "standard",
@@ -225,17 +226,24 @@ let lastFocusedElement = null;
 let lastPhotoFile = null;
 let largestViewportHeight = window.visualViewport?.height || window.innerHeight;
 let serviceStatus = { photoAnalysis: false, textAnalysis: false, speechRecognition: "browser", checked: false };
+let authConfig = { smsReady: false, identityReady: false, identityRequired: false, checked: false };
+let authBusy = false;
+let authCodeCooldown = 0;
+let authCodeTimer = null;
 
 document.addEventListener("DOMContentLoaded", init);
 
-function init() {
+async function init() {
   if ("scrollRestoration" in history) history.scrollRestoration = "manual";
+  state.auth = { ...state.auth, loggedIn: false };
+  state.screen = "login";
   buildChoices();
   bindEvents();
   syncForm();
   normalizeStartupRoute();
   renderAll();
   goToScreen(state.screen, false);
+  await refreshAuthSession();
   refreshServiceStatus();
   updateKeyboardLayout();
 }
@@ -360,14 +368,13 @@ function syncChoiceButtons() {
 
 function bindEvents() {
   $("#authForm").addEventListener("submit", handleAuthSubmit);
-  $("#authSubmit").addEventListener("click", handleAuthSubmit);
   $$("[data-auth-mode]").forEach((button) => {
     button.addEventListener("click", () => {
-      state.auth.authMode = button.dataset.authMode;
-      renderAuth();
-      saveState();
+      setAuthMode(button.dataset.authMode);
     });
   });
+  $("#forgotPassword").addEventListener("click", () => setAuthMode(state.auth.authMode === "reset" ? "login" : "reset"));
+  $("#sendAuthCode").addEventListener("click", requestAuthCode);
   $$(".role-card").forEach((card) => {
     card.addEventListener("click", () => {
       const input = card.querySelector("[name='authRole']");
@@ -391,16 +398,7 @@ function bindEvents() {
     setPrivacyConsent(privacyConsentButton.getAttribute("aria-checked") !== "true");
   });
 
-  $("#modeSwitch").addEventListener("click", () => {
-    state.auth = {
-      ...state.auth,
-      loggedIn: false,
-      role: state.mode === "family" ? "family" : "elder",
-    };
-    state.screen = "login";
-    state.wizardOpen = false;
-    goToScreen("login");
-  });
+  $("#modeSwitch").addEventListener("click", handleLogout);
 
   $$("[data-go]").forEach((button) => button.addEventListener("click", () => goToScreen(button.dataset.go)));
   $$(".bottom-nav button").forEach((button) => button.addEventListener("click", () => goToScreen(button.dataset.screen)));
@@ -545,37 +543,73 @@ function openPhotoPicker(inputId) {
   }
 }
 
-function handleAuthSubmit(event) {
+async function handleAuthSubmit(event) {
   event.preventDefault();
-  const formData = new FormData($("#authForm"));
-  const role = formData.get("authRole") === "family" ? "family" : "elder";
-  const name = $("#authName").value.trim();
-  const privacyAccepted = $("#privacyConsent")?.getAttribute("aria-checked") === "true";
-  if (!privacyAccepted) {
-    showToast("请先阅读并确认本机试用的数据说明");
+  if (authBusy) return;
+  setAuthError("");
+  const mode = ["login", "register", "reset"].includes(state.auth.authMode) ? state.auth.authMode : "login";
+  const phone = $("#authPhone").value.trim();
+  const password = $("#authPassword").value;
+  const code = $("#authCode").value.trim();
+  const confirmPassword = $("#authPasswordConfirm").value;
+  if (mode !== "login" && password !== confirmPassword) {
+    setAuthError("两次输入的密码不一致。");
     return;
   }
-  state.auth = {
-    ...state.auth,
-    loggedIn: true,
-    role,
-    name: name || (role === "family" ? "家人" : "长辈"),
-    phone: "",
-  };
-  state.privacy = { accepted: true, acceptedAt: state.privacy?.acceptedAt || new Date().toISOString() };
-  state.mode = role;
-  state.wizardOpen = false;
-  state.screen = role === "family" ? "family" : "home";
-  saveState();
-  renderAll();
-  goToScreen(state.screen, false);
-  showToast(role === "family" ? "已进入本机家人视图" : "已进入长辈端");
+  if (mode === "register" && $("#privacyConsent")?.getAttribute("aria-checked") !== "true") {
+    setAuthError("请先阅读并确认数据说明。");
+    return;
+  }
+  setAuthBusy(true);
+  try {
+    if (mode === "login") {
+      const result = await authApi("/api/auth/login", { phone, password });
+      completeAuthentication(result.user, false);
+      showToast("登录成功");
+      return;
+    }
+    if (mode === "register") {
+      const role = new FormData($("#authForm")).get("authRole") === "family" ? "family" : "elder";
+      const payload = {
+        phone,
+        code,
+        password,
+        nickname: $("#authName").value.trim(),
+        role,
+      };
+      if (authConfig.identityRequired) {
+        payload.realName = $("#authRealName").value.trim();
+        payload.idNumber = $("#authIdNumber").value.trim();
+      }
+      const result = await authApi("/api/auth/register", payload);
+      completeAuthentication(result.user, true);
+      showToast("注册成功");
+      return;
+    }
+    await authApi("/api/auth/password-reset/confirm", { phone, code, password });
+    setAuthMode("login");
+    $("#authPassword").value = "";
+    $("#authPasswordConfirm").value = "";
+    $("#authCode").value = "";
+    showToast("密码已更新，请重新登录");
+  } catch (error) {
+    setAuthError(error.message || "账号服务暂时不可用，请稍后再试。");
+  } finally {
+    setAuthBusy(false);
+  }
 }
 
 function renderAuth() {
   const isAuthScreen = state.screen === "login" || !state.auth?.loggedIn;
   $(".app-shell").classList.toggle("is-auth-screen", isAuthScreen);
+  const mode = ["login", "register", "reset"].includes(state.auth?.authMode) ? state.auth.authMode : "login";
   const role = state.auth?.role === "family" ? "family" : "elder";
+  $$("[data-auth-mode]").forEach((button) => button.classList.toggle("is-active", button.dataset.authMode === mode));
+  $$("[data-auth-register]").forEach((node) => { node.hidden = mode !== "register"; });
+  $$("[data-auth-code]").forEach((node) => { node.hidden = mode === "login"; });
+  $$("[data-auth-new-password]").forEach((node) => { node.hidden = mode === "login"; });
+  const identityFields = $("#identityFields");
+  if (identityFields) identityFields.hidden = mode !== "register" || !authConfig.identityRequired;
   $$("[name='authRole']").forEach((input) => {
     input.checked = input.value === role;
     input.closest(".role-card")?.classList.toggle("is-active", input.checked);
@@ -586,10 +620,166 @@ function renderAuth() {
     consent.setAttribute("aria-checked", accepted ? "true" : "false");
     consent.classList.toggle("is-checked", accepted);
   }
-  $("#authSubmit").textContent = `进入${role === "family" ? "家人视图" : "长辈端"}`;
-  $("#authHelper").textContent = role === "family"
-    ? "家人视图仅展示这台设备上的记录，不代表已经完成真实家庭绑定。"
-    : "长辈端用于语音记餐、拍饭菜照片和查看本机红黄绿提醒。";
+  $("#loginTitle").textContent = mode === "register" ? "创建慧食账号" : mode === "reset" ? "找回密码" : "手机号登录";
+  $("#loginIntro").textContent = mode === "register"
+    ? "验证手机号并设置密码，之后可在这台设备安全登录。"
+    : mode === "reset"
+      ? "通过短信验证码设置新密码。"
+      : "登录后继续使用语音记餐、拍照识别和健康提醒。";
+  $("#authPasswordLabel").textContent = mode === "login" ? "密码" : "设置新密码";
+  $("#authPassword").autocomplete = mode === "login" ? "current-password" : "new-password";
+  $("#authPassword").placeholder = mode === "login" ? "请输入密码" : "8 至 72 个字符";
+  $("#authSubmit").textContent = mode === "register" ? "完成注册" : mode === "reset" ? "更新密码" : "登录";
+  $("#forgotPassword").hidden = mode === "register";
+  $("#forgotPassword").textContent = mode === "reset" ? "返回登录" : "忘记密码";
+  $("#authHelper").textContent = mode === "login"
+    ? "账号密码经过安全哈希处理，服务器不会保存明文密码。"
+    : mode === "register"
+      ? "短信验证码 5 分钟内有效；密码请勿使用连续或重复数字。"
+      : "更新密码后，其他设备上的登录会自动失效。";
+  const serviceNotice = $("#authServiceNotice");
+  const identityUnavailable = mode === "register" && authConfig.identityRequired && !authConfig.identityReady;
+  if (serviceNotice) {
+    serviceNotice.hidden = mode === "login" || (authConfig.checked && authConfig.smsReady && !identityUnavailable);
+    serviceNotice.textContent = !authConfig.checked
+      ? "正在检查账号服务…"
+      : !authConfig.smsReady
+        ? "短信服务正在配置，暂时不能注册或找回密码。"
+        : "实名认证服务正在配置，暂时不能完成注册。";
+  }
+  updateAuthCodeButton();
+  $("#authSubmit").disabled = authBusy || (mode !== "login" && authConfig.checked && !authConfig.smsReady) || identityUnavailable;
+}
+
+function setAuthMode(mode) {
+  state.auth.authMode = ["login", "register", "reset"].includes(mode) ? mode : "login";
+  setAuthError("");
+  $("#authCode").value = "";
+  $("#authPassword").value = "";
+  $("#authPasswordConfirm").value = "";
+  renderAuth();
+  saveState();
+}
+
+async function requestAuthCode() {
+  if (authBusy || authCodeCooldown > 0) return;
+  const mode = state.auth.authMode;
+  if (mode !== "register" && mode !== "reset") return;
+  setAuthError("");
+  setAuthBusy(true);
+  try {
+    const endpoint = mode === "reset" ? "/api/auth/password-reset/request" : "/api/auth/sms/request";
+    const payload = mode === "reset"
+      ? { phone: $("#authPhone").value.trim() }
+      : { phone: $("#authPhone").value.trim(), purpose: "register" };
+    const result = await authApi(endpoint, payload);
+    startAuthCodeCooldown(Number(result.retryAfter || 60));
+    showToast("验证码已发送，请查看短信");
+  } catch (error) {
+    setAuthError(error.message || "验证码发送失败，请稍后再试。");
+  } finally {
+    setAuthBusy(false);
+  }
+}
+
+function startAuthCodeCooldown(seconds) {
+  clearInterval(authCodeTimer);
+  authCodeCooldown = Math.max(1, Math.min(120, Math.floor(seconds)));
+  updateAuthCodeButton();
+  authCodeTimer = setInterval(() => {
+    authCodeCooldown -= 1;
+    updateAuthCodeButton();
+    if (authCodeCooldown <= 0) clearInterval(authCodeTimer);
+  }, 1000);
+}
+
+function updateAuthCodeButton() {
+  const button = $("#sendAuthCode");
+  if (!button) return;
+  button.textContent = authCodeCooldown > 0 ? `${authCodeCooldown} 秒后重发` : "获取验证码";
+  button.disabled = authBusy || authCodeCooldown > 0 || (authConfig.checked && !authConfig.smsReady);
+}
+
+function setAuthBusy(busy) {
+  authBusy = Boolean(busy);
+  $("#authForm")?.setAttribute("aria-busy", authBusy ? "true" : "false");
+  renderAuth();
+}
+
+function setAuthError(message) {
+  const error = $("#authError");
+  if (!error) return;
+  error.textContent = message;
+  error.hidden = !message;
+}
+
+async function authApi(pathname, body) {
+  let response;
+  try {
+    response = await fetch(pathname, {
+      method: body === undefined ? "GET" : "POST",
+      headers: body === undefined ? { Accept: "application/json" } : { Accept: "application/json", "Content-Type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch {
+    throw new Error("无法连接账号服务，请检查网络后重试。");
+  }
+  let data = {};
+  try { data = await response.json(); } catch {}
+  if (!response.ok) throw new Error(data.message || "账号服务暂时不可用，请稍后再试。");
+  return data;
+}
+
+function completeAuthentication(user, acceptedPrivacy) {
+  const role = user?.role === "family" ? "family" : "elder";
+  state.auth = {
+    ...state.auth,
+    loggedIn: true,
+    authMode: "login",
+    role,
+    name: user?.nickname || (role === "family" ? "家人" : "长辈"),
+    phone: user?.phone || "",
+    identityStatus: user?.identityStatus || "unverified",
+  };
+  if (acceptedPrivacy) state.privacy = { accepted: true, acceptedAt: new Date().toISOString() };
+  state.mode = role;
+  state.wizardOpen = false;
+  state.screen = role === "family" ? "family" : "home";
+  $("#authPassword").value = "";
+  $("#authPasswordConfirm").value = "";
+  $("#authCode").value = "";
+  saveState();
+  renderAll();
+  goToScreen(state.screen, false);
+}
+
+async function refreshAuthSession() {
+  try {
+    const result = await authApi("/api/auth/status");
+    authConfig = { ...authConfig, ...(result.config || {}), checked: true };
+    if (result.authenticated && result.user) {
+      completeAuthentication(result.user, false);
+      return;
+    }
+  } catch {
+    authConfig.checked = true;
+  }
+  state.auth = { ...DEFAULT_STATE.auth, authMode: state.auth?.authMode || "login" };
+  state.screen = "login";
+  normalizeStartupRoute();
+  renderAll();
+  goToScreen("login", false);
+}
+
+async function handleLogout() {
+  try { await authApi("/api/auth/logout", {}); } catch {}
+  state.auth = { ...DEFAULT_STATE.auth, role: state.auth?.role === "family" ? "family" : "elder" };
+  state.screen = "login";
+  state.wizardOpen = false;
+  saveState();
+  renderAll();
+  goToScreen("login", false);
+  showToast("已退出登录");
 }
 
 function setPrivacyConsent(accepted) {
@@ -641,7 +831,7 @@ function renderPhotoAccessHint() {
 function renderMode() {
   const isFamily = state.mode === "family";
   $("#modeLabel").textContent = isFamily ? "家人端" : "长辈端";
-  $("#modeSwitch").textContent = "切换身份";
+  $("#modeSwitch").textContent = "退出登录";
 }
 
 function setMealMode(mode) {

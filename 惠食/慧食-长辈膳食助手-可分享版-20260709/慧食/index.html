@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#f6e4d8" />
     <title>慧食·长辈膳食助手</title>
-    <link rel="stylesheet" href="./styles.css?v=20260813e" />
+    <link rel="stylesheet" href="./styles.css?v=20260814a" />
   </head>
   <body>
     <svg class="icon-sprite" aria-hidden="true">
@@ -47,12 +47,20 @@
               <img src="./assets/logo.png" alt="" />
             </span>
             <p class="eyebrow">慧食</p>
-            <h2 id="loginTitle">先选择使用身份</h2>
-            <p>当前为本机封闭试用，数据不会自动同步到其他设备。</p>
+            <h2 id="loginTitle">手机号登录</h2>
+            <p id="loginIntro">登录后继续使用语音记餐、拍照识别和健康提醒。</p>
           </div>
 
-          <form class="auth-card" id="authForm">
-            <fieldset class="auth-role-field">
+          <form class="auth-card" id="authForm" novalidate>
+            <div class="auth-segment" role="group" aria-label="账号操作">
+              <button class="is-active" type="button" data-auth-mode="login">登录</button>
+              <button type="button" data-auth-mode="register">注册</button>
+            </div>
+
+            <p class="auth-service-notice" id="authServiceNotice" role="status">正在检查账号服务…</p>
+            <p class="auth-error" id="authError" role="alert" hidden></p>
+
+            <fieldset class="auth-role-field" data-auth-register hidden>
               <legend>选择身份</legend>
               <div class="role-grid">
                 <label class="role-card is-active">
@@ -70,15 +78,49 @@
               </div>
             </fieldset>
 
-            <label class="auth-label" for="authName">姓名或昵称
+            <label class="auth-label" for="authName" data-auth-register hidden>姓名或昵称
               <input id="authName" type="text" autocomplete="name" placeholder="例如：妈妈、女儿" />
             </label>
-            <button class="consent-row consent-toggle" id="privacyConsent" type="button" role="checkbox" aria-checked="false">
+
+            <label class="auth-label" for="authPhone">手机号
+              <input id="authPhone" type="tel" autocomplete="tel-national" inputmode="numeric" maxlength="11" placeholder="请输入 11 位手机号" />
+            </label>
+
+            <div class="auth-code-row" data-auth-code hidden>
+              <label class="auth-label" for="authCode">短信验证码
+                <input id="authCode" type="text" autocomplete="one-time-code" inputmode="numeric" maxlength="6" placeholder="6 位验证码" />
+              </label>
+              <button class="secondary-button auth-code-button" id="sendAuthCode" type="button">获取验证码</button>
+            </div>
+
+            <label class="auth-label" for="authPassword"><span id="authPasswordLabel">密码</span>
+              <input id="authPassword" type="password" autocomplete="current-password" maxlength="72" placeholder="请输入密码" />
+            </label>
+
+            <label class="auth-label" for="authPasswordConfirm" data-auth-new-password hidden>确认新密码
+              <input id="authPasswordConfirm" type="password" autocomplete="new-password" maxlength="72" placeholder="再次输入密码" />
+            </label>
+
+            <section class="identity-fields" id="identityFields" data-auth-register hidden>
+              <div>
+                <strong>手机号实名认证</strong>
+                <p>姓名和身份证号只用于服务商核验，身份证号不会保存到慧食数据库。</p>
+              </div>
+              <label class="auth-label" for="authRealName">真实姓名
+                <input id="authRealName" type="text" autocomplete="name" maxlength="30" placeholder="与身份证一致" />
+              </label>
+              <label class="auth-label" for="authIdNumber">身份证号
+                <input id="authIdNumber" type="text" autocomplete="off" inputmode="text" maxlength="18" placeholder="18 位身份证号" />
+              </label>
+            </section>
+
+            <button class="consent-row consent-toggle" id="privacyConsent" data-auth-register type="button" role="checkbox" aria-checked="false" hidden>
               <span class="consent-check" aria-hidden="true"><svg><use href="#i-check"></use></svg></span>
-              <span>我已了解：只有主动进行语音、文字或照片分析时，对应输入与所填健康档案才会发送给当前配置的 AI 服务；本机试用不提供真实登录或跨设备家庭同步。</span>
+              <span>我已了解：账号信息会安全存储在慧食服务器；只有主动使用语音、文字、照片分析或实名认证时，对应数据才会发送给已配置的服务商。</span>
             </button>
-            <button class="primary-button auth-submit" id="authSubmit" type="submit">进入长辈端</button>
-            <p class="auth-helper" id="authHelper">长辈端用于语音记餐、拍照问一问和查看本机提醒。</p>
+            <button class="primary-button auth-submit" id="authSubmit" type="submit">登录</button>
+            <button class="auth-forgot" id="forgotPassword" type="button">忘记密码</button>
+            <p class="auth-helper" id="authHelper">账号密码经过加密处理，服务器不会保存明文密码。</p>
             <button class="text-button clear-local-data" id="clearLocalData" type="button">清除本机全部数据</button>
           </form>
         </section>
@@ -341,6 +383,6 @@
       <div class="meal-result-sheet" id="mealResultSheet"></div>
     </div>
     <div class="toast" id="toast" hidden role="status" aria-live="polite"></div>
-    <script src="./app.js?v=20260813e"></script>
+    <script src="./app.js?v=20260814a"></script>
   </body>
 </html>
