@@ -1,10 +1,12 @@
 const assert = require("node:assert/strict");
 const { after, before, test } = require("node:test");
 const {
+  getLocalModelJsonContent,
   normalizeMealAnalysisJson,
   normalizeStatus,
   sanitizeProfile,
   server,
+  validateAudioPayload,
   validateImagePayload,
 } = require("../server");
 
@@ -45,9 +47,21 @@ test("API rejects cross-origin requests before model access", async () => {
   assert.equal(response.headers.get("access-control-allow-origin"), null);
 });
 
+test("status endpoint reports optional analysis capabilities without exposing configuration", async () => {
+  const response = await fetch(`${baseUrl}/api/status`);
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    ok: true,
+    photoAnalysis: false,
+    textAnalysis: false,
+    speechRecognition: "browser",
+  });
+});
+
 test("AI status and confidence normalization fail closed", () => {
   assert.equal(normalizeStatus("maybe"), "unclear");
   assert.equal(normalizeStatus("food"), "food");
+  assert.equal(normalizeStatus("success"), "food");
 
   const result = normalizeMealAnalysisJson(JSON.stringify({
     status: "food",
@@ -69,6 +83,19 @@ test("AI status and confidence normalization fail closed", () => {
   assert.equal(notFood.status, "not-food");
 });
 
+test("local model JSON falls back to Ollama reasoning output", () => {
+  assert.equal(getLocalModelJsonContent({ content: '{"status":"food"}' }), '{"status":"food"}');
+  assert.equal(
+    getLocalModelJsonContent({ content: "", reasoning: '{"status":"unclear"}' }),
+    '{"status":"unclear"}',
+  );
+  assert.equal(
+    getLocalModelJsonContent({ content: "", thinking: '{"status":"food"}' }),
+    '{"status":"food"}',
+  );
+  assert.equal(getLocalModelJsonContent(null), "{}");
+});
+
 test("profile and image payloads are bounded", () => {
   assert.deepEqual(sanitizeProfile({ age: 8, allergies: ["花生", "虾"], personal: "x".repeat(400) }), {
     age: null,
@@ -83,4 +110,35 @@ test("profile and image payloads are bounded", () => {
     () => validateImagePayload({ image: "AA==", mimeType: "image/gif" }),
     (error) => error.status === 415 && error.code === "unsupported_image_type",
   );
+});
+
+test("speech audio payloads are type and size constrained", () => {
+  const audio = validateAudioPayload({
+    audio: Buffer.alloc(512, 1).toString("base64"),
+    mimeType: "audio/webm;codecs=opus",
+  });
+  assert.equal(audio.extension, ".webm");
+  assert.equal(audio.buffer.length, 512);
+  assert.throws(
+    () => validateAudioPayload({ audio: Buffer.alloc(512, 1).toString("base64"), mimeType: "audio/aac" }),
+    (error) => error.status === 415 && error.code === "unsupported_audio_type",
+  );
+  assert.throws(
+    () => validateAudioPayload({ audio: Buffer.alloc(64, 1).toString("base64"), mimeType: "audio/webm" }),
+    (error) => error.status === 422 && error.code === "audio_too_short",
+  );
+});
+
+test("voice remains the primary action while mobile recovery controls are shipped", () => {
+  const appSource = require("node:fs").readFileSync(require("node:path").join(__dirname, "..", "app.js"), "utf8");
+  const stylesSource = require("node:fs").readFileSync(require("node:path").join(__dirname, "..", "styles.css"), "utf8");
+  assert.match(appSource, /window\.isSecureContext/);
+  assert.match(appSource, /recordButton\.hidden = false/);
+  assert.doesNotMatch(appSource, /recordButton\.setAttribute\("aria-disabled"/);
+  assert.match(appSource, /MediaRecorder/);
+  assert.match(appSource, /\/api\/transcribe-speech/);
+  assert.match(appSource, /文字输入仅作备用/);
+  assert.match(appSource, /data-photo-retry/);
+  assert.match(appSource, /data-photo-to-text/);
+  assert.match(stylesSource, /html\.keyboard-open \.bottom-nav/);
 });

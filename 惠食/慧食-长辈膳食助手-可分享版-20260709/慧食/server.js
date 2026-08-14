@@ -1,6 +1,9 @@
 const http = require("http");
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
+const { execFile } = require("child_process");
+const { promisify } = require("util");
 
 const ROOT = __dirname;
 loadEnvFile();
@@ -18,7 +21,14 @@ const OMNI_PHOTO_MEAL_MODEL = process.env.OMINIGATE_PHOTO_MEAL_MODEL || process.
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const OPENROUTER_BASE_URL = process.env.OPENROUTER_BASE_URL || "https://openrouter.ai/api/v1";
 const OPENROUTER_PHOTO_MEAL_MODEL = process.env.OPENROUTER_PHOTO_MEAL_MODEL || "google/gemma-4-26b-a4b-it:free";
-const API_PATHS = new Set(["/api/analyze-photo", "/api/analyze-voice-meal", "/api/analyze-photo-meal"]);
+const LOCAL_MODEL_BASE_URL = process.env.LOCAL_MODEL_BASE_URL || "";
+const LOCAL_MODEL = process.env.LOCAL_MODEL || "qwen3-vl:8b";
+const WHISPER_COMMAND = process.env.WHISPER_COMMAND || "";
+const WHISPER_MODEL = process.env.WHISPER_MODEL || "";
+const WHISPER_LIBRARY_PATH = process.env.WHISPER_LIBRARY_PATH || "";
+const FFMPEG_COMMAND = process.env.FFMPEG_COMMAND || "/usr/bin/ffmpeg";
+const execFileAsync = promisify(execFile);
+const API_PATHS = new Set(["/api/status", "/api/transcribe-speech", "/api/analyze-photo", "/api/analyze-voice-meal", "/api/analyze-photo-meal"]);
 const PUBLIC_FILES = new Map([
   ["/", "index.html"],
   ["/index.html", "index.html"],
@@ -30,6 +40,7 @@ const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX = Number(process.env.API_RATE_LIMIT || 30);
 const UPSTREAM_TIMEOUT_MS = Number(process.env.UPSTREAM_TIMEOUT_MS || 18_000);
 const rateLimits = new Map();
+let activeTranscriptions = 0;
 
 const TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -68,6 +79,8 @@ const server = http.createServer(async (req, res) => {
       sendJson(res, 429, { error: "rate_limited", message: "请求过于频繁，请稍后再试。" });
       return;
     }
+    if (pathname === "/api/status") handleStatus(req, res);
+    if (pathname === "/api/transcribe-speech") await handleTranscribeSpeech(req, res);
     if (pathname === "/api/analyze-photo") await handleAnalyzePhoto(req, res);
     if (pathname === "/api/analyze-voice-meal") await handleAnalyzeVoiceMeal(req, res);
     if (pathname === "/api/analyze-photo-meal") await handleAnalyzePhotoMeal(req, res);
@@ -202,8 +215,8 @@ async function handleAnalyzeVoiceMeal(req, res) {
     sendJson(res, 405, { error: "Method not allowed" });
     return;
   }
-  if (!OMNI_API_KEY) {
-    sendJson(res, 503, { error: "Meal model is not configured" });
+  if (!LOCAL_MODEL_BASE_URL && !OMNI_API_KEY) {
+    sendJson(res, 503, { error: "meal_model_not_configured", message: "文字分析服务正在准备中，请稍后再试。" });
     return;
   }
   try {
@@ -213,10 +226,43 @@ async function handleAnalyzeVoiceMeal(req, res) {
       sendJson(res, 400, { error: "Missing meal text", message: "请先输入或说出这一餐吃了什么。" });
       return;
     }
-    const result = await callVoiceMealModel(text.slice(0, 500), sanitizeProfile(body.profile));
+    const result = LOCAL_MODEL_BASE_URL
+      ? await callLocalMealModel(text.slice(0, 500), sanitizeProfile(body.profile))
+      : await callVoiceMealModel(text.slice(0, 500), sanitizeProfile(body.profile));
     sendJson(res, 200, result);
   } catch (error) {
     sendApiError(res, error, "voice_analysis_failed");
+  }
+}
+
+async function handleTranscribeSpeech(req, res) {
+  if (req.method !== "POST") {
+    sendJson(res, 405, { error: "method_not_allowed", message: "请求方法不受支持。" });
+    return;
+  }
+  if (!isSpeechTranscriptionConfigured()) {
+    sendJson(res, 503, { error: "speech_model_not_configured", message: "语音转写服务正在准备中。" });
+    return;
+  }
+  if (activeTranscriptions >= 1) {
+    res.setHeader("Retry-After", "8");
+    sendJson(res, 429, { error: "speech_busy", message: "正在听另一段语音，请稍后再说一次。" });
+    return;
+  }
+  activeTranscriptions += 1;
+  try {
+    const body = await readJsonBody(req, 7 * 1024 * 1024);
+    const audio = validateAudioPayload(body);
+    const text = await transcribeSpeechAudio(audio);
+    if (!text) {
+      sendJson(res, 422, { error: "speech_unclear", message: "没有听清楚，请靠近手机再说一次。" });
+      return;
+    }
+    sendJson(res, 200, { text });
+  } catch (error) {
+    sendApiError(res, error, "speech_transcription_failed");
+  } finally {
+    activeTranscriptions -= 1;
   }
 }
 
@@ -225,8 +271,8 @@ async function handleAnalyzePhotoMeal(req, res) {
     sendJson(res, 405, { error: "Method not allowed" });
     return;
   }
-  if (!OPENAI_API_KEY && !OPENROUTER_API_KEY && !OMNI_API_KEY) {
-    sendJson(res, 503, { error: "photo_model_not_configured", message: "照片识别服务尚未配置，请先配置支持图像输入的模型。" });
+  if (!LOCAL_MODEL_BASE_URL && !OPENAI_API_KEY && !OPENROUTER_API_KEY && !OMNI_API_KEY) {
+    sendJson(res, 503, { error: "photo_model_not_configured", message: "照片识别服务正在准备中，请稍后再试。" });
     return;
   }
   try {
@@ -241,6 +287,26 @@ async function handleAnalyzePhotoMeal(req, res) {
   } catch (error) {
     sendApiError(res, error, "photo_meal_analysis_failed");
   }
+}
+
+function handleStatus(req, res) {
+  if (req.method !== "GET" && req.method !== "HEAD") {
+    sendJson(res, 405, { error: "method_not_allowed", message: "请求方法不受支持。" });
+    return;
+  }
+  const localModel = Boolean(LOCAL_MODEL_BASE_URL);
+  const payload = {
+    ok: true,
+    photoAnalysis: localModel || Boolean(OPENAI_API_KEY || OPENROUTER_API_KEY || OMNI_API_KEY),
+    textAnalysis: localModel || Boolean(OMNI_API_KEY),
+    speechRecognition: isSpeechTranscriptionConfigured() ? "server" : "browser",
+  };
+  if (req.method === "HEAD") {
+    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+    res.end();
+    return;
+  }
+  sendJson(res, 200, payload);
 }
 
 function readJsonBody(req, maxBytes) {
@@ -292,6 +358,68 @@ function validateImagePayload(body) {
   }
   if (body.image.length > 7_500_000) {
     throw new HttpError(413, "image_too_large", "图片过大，请选择较小的照片。");
+  }
+}
+
+function validateAudioPayload(body) {
+  if (!body.audio || typeof body.audio !== "string") {
+    throw new HttpError(400, "missing_audio", "没有收到语音，请再说一次。");
+  }
+  const mimeType = String(body.mimeType || "audio/webm").toLowerCase().split(";")[0];
+  const extensions = {
+    "audio/webm": ".webm",
+    "audio/ogg": ".ogg",
+    "audio/mp4": ".m4a",
+    "audio/mpeg": ".mp3",
+    "audio/wav": ".wav",
+    "audio/x-wav": ".wav",
+    "audio/x-m4a": ".m4a",
+  };
+  const extension = extensions[mimeType];
+  if (!extension) throw new HttpError(415, "unsupported_audio_type", "当前录音格式不受支持，请换用系统浏览器。 ");
+  const encoded = body.audio.startsWith("data:") ? body.audio.slice(body.audio.indexOf(",") + 1) : body.audio;
+  const buffer = Buffer.from(encoded, "base64");
+  if (buffer.length < 256) throw new HttpError(422, "audio_too_short", "录音太短，请说完整一句话。 ");
+  if (buffer.length > 5 * 1024 * 1024) throw new HttpError(413, "audio_too_large", "录音过长，请在十秒内说完。 ");
+  return { buffer, extension };
+}
+
+function isSpeechTranscriptionConfigured() {
+  return Boolean(
+    WHISPER_COMMAND && WHISPER_MODEL
+    && fs.existsSync(WHISPER_COMMAND)
+    && fs.existsSync(WHISPER_MODEL)
+    && fs.existsSync(FFMPEG_COMMAND)
+  );
+}
+
+async function transcribeSpeechAudio({ buffer, extension }) {
+  const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "huishi-speech-"));
+  const inputPath = path.join(tempDir, `input${extension}`);
+  const wavPath = path.join(tempDir, "audio.wav");
+  const outputBase = path.join(tempDir, "transcript");
+  try {
+    await fs.promises.writeFile(inputPath, buffer, { mode: 0o600 });
+    await execFileAsync(FFMPEG_COMMAND, [
+      "-hide_banner", "-loglevel", "error", "-y", "-i", inputPath,
+      "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wavPath,
+    ], { timeout: 15_000, maxBuffer: 512 * 1024 });
+    await execFileAsync(WHISPER_COMMAND, [
+      "-m", WHISPER_MODEL, "-f", wavPath, "-l", "zh", "-t", "4",
+      "-np", "-nt", "-sns", "-otxt", "-of", outputBase,
+      "--prompt", "长辈饮食记录：米饭、面条、鸡蛋、青菜、豆腐、鱼、肉、汤。",
+    ], {
+      timeout: 30_000,
+      maxBuffer: 2 * 1024 * 1024,
+      env: {
+        ...process.env,
+        LD_LIBRARY_PATH: [WHISPER_LIBRARY_PATH, process.env.LD_LIBRARY_PATH].filter(Boolean).join(":"),
+      },
+    });
+    const text = await fs.promises.readFile(`${outputBase}.txt`, "utf8");
+    return text.replace(/\[[^\]]+\]/g, "").replace(/\s+/g, " ").trim().slice(0, 500);
+  } finally {
+    await fs.promises.rm(tempDir, { recursive: true, force: true });
   }
 }
 
@@ -351,8 +479,57 @@ async function callVoiceMealModel(text, profile) {
   return normalizeMealAnalysisJson(content, { defaultStatus: "food" });
 }
 
+async function callLocalMealModel(text, profile) {
+  const endpoint = getLocalModelChatEndpoint();
+  const response = await fetchWithTimeout(endpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: LOCAL_MODEL,
+      stream: false,
+      think: false,
+      format: "json",
+      options: { temperature: 0.1, num_predict: 700 },
+      messages: [
+        {
+          role: "system",
+          content: [
+            "你是慧食长辈膳食助手的文字餐食分析模块，只输出一个合法 JSON 对象，不输出 Markdown。",
+            "先判断用户输入是否在描述饭菜或询问某种食物能不能吃。无关内容返回 status=not-meal、foods=[]。",
+            "能识别饭菜时，列出明确出现的食物，不要编造；每项必须填写 confidence、portion、salt、carb、tags。",
+            "confidence 使用 0 到 1；不确定的食物不要输出。",
+            "结合健康档案给出简短提醒，但不得降低过敏、慢病等安全红线。",
+            "JSON 字段：status:'food|unclear|not-meal',message:string,foods:[{name:string,alias:string,confidence:number,portion:string,salt:number,carb:string,tags:string[]}],level:'red|yellow|green',title:string,safety:string,nutrition:string,advice:string,basis:string。",
+          ].join(""),
+        },
+        {
+          role: "user",
+          content: `健康档案：${JSON.stringify(profile)}\n用户输入：${text}`,
+        },
+      ],
+    }),
+  }, 45_000);
+  if (!response.ok) {
+    const detail = await readUpstreamError(response);
+    throw new Error(`Local meal API returned ${response.status}${detail}`);
+  }
+  const data = await response.json();
+  const content = getLocalModelJsonContent(data.message);
+  const result = normalizeMealAnalysisJson(content, { defaultStatus: "food" });
+  result.provider = "local";
+  result.model = LOCAL_MODEL;
+  return result;
+}
+
 async function callPhotoMealModel(image, mimeType, profile) {
   const providerErrors = [];
+  if (LOCAL_MODEL_BASE_URL) {
+    try {
+      return await callLocalPhotoMealModel(image, mimeType, profile);
+    } catch (error) {
+      providerErrors.push(`Local: ${String(error?.message || error).slice(0, 180)}`);
+    }
+  }
   if (OPENAI_API_KEY) {
     try {
       const result = await callDirectOpenAIPhotoMealModel(image, mimeType, profile);
@@ -379,6 +556,49 @@ async function callPhotoMealModel(image, mimeType, profile) {
     }
   }
   throw new Error(providerErrors.join(" | ") || "No photo model is configured");
+}
+
+async function callLocalPhotoMealModel(image, mimeType, profile) {
+  const endpoint = getLocalModelChatEndpoint();
+  const imageData = image.startsWith("data:") ? image.slice(image.indexOf(",") + 1) : image;
+  const response = await fetchWithTimeout(endpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: LOCAL_MODEL,
+      stream: false,
+      think: false,
+      format: "json",
+      options: { temperature: 0.1, num_predict: 900 },
+      messages: [
+        {
+          role: "system",
+          content: [
+            "你是慧食长辈膳食助手的饭菜照片识别模块，只输出一个合法 JSON 对象，不输出 Markdown。",
+            "先判断图片是否为饭菜、餐盘、餐桌、食物包装或菜单。不是饭菜时返回 status=not-food、isFoodPhoto=false、foods=[]。",
+            "能看清饭菜时只列出明确可辨认的食物，不要猜测遮挡或模糊部分。每项 confidence 必须是 0 到 1。",
+            "结合健康档案给出简短、可执行的中文提醒，不得降低过敏、慢病等安全红线。",
+            "JSON 字段：status:'food|unclear|not-food',isFoodPhoto:boolean,message:string,foods:[{name:string,alias:string,confidence:number,portion:string,caloriesPer100g:number,estimatedGrams:number,estimatedCalories:number,salt:number,carb:string,tags:string[]}],level:'red|yellow|green',title:string,safety:string,nutrition:string,advice:string,basis:string。",
+          ].join(""),
+        },
+        {
+          role: "user",
+          content: `用户健康档案：${JSON.stringify(profile)}。请识别照片里的饭菜并给出适合长辈的提醒。`,
+          images: [imageData],
+        },
+      ],
+    }),
+  }, 60_000);
+  if (!response.ok) {
+    const detail = await readUpstreamError(response);
+    throw new Error(`Local photo API returned ${response.status}${detail}`);
+  }
+  const data = await response.json();
+  const content = getLocalModelJsonContent(data.message);
+  const result = normalizeMealAnalysisJson(content, { defaultStatus: "food", includeIsFoodPhoto: true });
+  result.provider = "local";
+  result.model = LOCAL_MODEL;
+  return result;
 }
 
 async function callDirectOpenAIPhotoMealModel(image, mimeType, profile) {
@@ -693,7 +913,7 @@ function normalizeStatus(status) {
   if (["not-food", "not_food", "non-food", "不是食物", "不是饭菜"].some((item) => value.includes(item))) return "not-food";
   if (["not-meal", "not_meal", "不是饮食", "无关"].some((item) => value.includes(item))) return "not-meal";
   if (["unclear", "不清楚", "看不清", "听不清"].some((item) => value.includes(item))) return "unclear";
-  if (["food", "meal", "是食物", "是饭菜"].some((item) => value === item || value.includes(item))) return "food";
+  if (["food", "meal", "success", "是食物", "是饭菜"].some((item) => value === item || value.includes(item))) return "food";
   return "unclear";
 }
 
@@ -718,10 +938,23 @@ function parseJsonObject(content) {
   }
 }
 
+function getLocalModelJsonContent(message) {
+  if (typeof message?.content === "string" && message.content.trim()) return message.content;
+  if (typeof message?.thinking === "string" && message.thinking.trim()) return message.thinking;
+  if (typeof message?.reasoning === "string" && message.reasoning.trim()) return message.reasoning;
+  return "{}";
+}
+
+function getLocalModelChatEndpoint() {
+  return `${LOCAL_MODEL_BASE_URL.replace(/\/v1\/?$/, "").replace(/\/$/, "")}/api/chat`;
+}
+
 module.exports = {
+  getLocalModelJsonContent,
   server,
   normalizeMealAnalysisJson,
   normalizeStatus,
   sanitizeProfile,
+  validateAudioPayload,
   validateImagePayload,
 };

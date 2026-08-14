@@ -1595,6 +1595,10 @@ textarea {
   text-align: center;
 }
 
+.voice-recorder.is-unavailable .record-button {
+  box-shadow: 0 0 0 5px rgba(194, 99, 47, 0.1), 0 14px 28px rgba(194, 99, 47, 0.18);
+}
+
 .record-button {
   width: 104px;
   height: 104px;
@@ -1886,6 +1890,18 @@ textarea {
   min-height: 58px;
   text-align: center;
   cursor: pointer;
+}
+
+.recovery-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.recovery-actions button {
+  min-width: 0;
+  min-height: 52px;
 }
 
 .demo-plate {
@@ -2836,6 +2852,16 @@ textarea {
   text-align: center;
   font-weight: 900;
   box-shadow: var(--shadow);
+  pointer-events: none;
+}
+
+html.keyboard-open main {
+  padding-bottom: calc(24px + env(safe-area-inset-bottom));
+}
+
+html.keyboard-open .bottom-nav,
+html.keyboard-open .toast {
+  display: none !important;
 }
 
 button:active,
@@ -2851,6 +2877,10 @@ button,
 }
 
 @media (max-width: 380px) {
+  .recovery-actions {
+    grid-template-columns: 1fr;
+  }
+
   .bmi-main {
     grid-template-columns: 1fr;
     gap: 12px;

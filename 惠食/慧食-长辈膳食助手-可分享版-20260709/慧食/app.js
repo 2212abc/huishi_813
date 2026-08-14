@@ -210,6 +210,9 @@ const $$ = (selector) => Array.from(document.querySelectorAll(selector));
 let state = loadState();
 let toastTimer = null;
 let recognition = null;
+let mediaRecorder = null;
+let mediaStream = null;
+let recordedAudioChunks = [];
 let listening = false;
 let speechStopTimer = null;
 let voicePreviewTimer = null;
@@ -219,6 +222,9 @@ let speechPaused = false;
 let pendingVoiceMeal = null;
 let currentMealResult = null;
 let lastFocusedElement = null;
+let lastPhotoFile = null;
+let largestViewportHeight = window.visualViewport?.height || window.innerHeight;
+let serviceStatus = { photoAnalysis: false, textAnalysis: false, speechRecognition: "browser", checked: false };
 
 document.addEventListener("DOMContentLoaded", init);
 
@@ -230,6 +236,8 @@ function init() {
   normalizeStartupRoute();
   renderAll();
   goToScreen(state.screen, false);
+  refreshServiceStatus();
+  updateKeyboardLayout();
 }
 
 function loadState() {
@@ -480,6 +488,17 @@ function bindEvents() {
       confirmPendingMeal();
       return;
     }
+    const photoRetry = event.target.closest("[data-photo-retry]");
+    if (photoRetry) {
+      retryLastPhoto();
+      return;
+    }
+    const photoToText = event.target.closest("[data-photo-to-text]");
+    if (photoToText) {
+      goToScreen("voice");
+      requestAnimationFrame(() => $("#voiceText")?.focus());
+      return;
+    }
     const modalAction = event.target.closest("[data-meal-result-action]");
     if (modalAction) {
       handleMealResultAction(modalAction.dataset.mealResultAction);
@@ -496,6 +515,13 @@ function bindEvents() {
     const select = event.target.closest("[data-portion-select]");
     if (select) updatePendingPortion(select.dataset.portionSelect, select.value);
   });
+  document.addEventListener("focusin", (event) => {
+    if (event.target.matches("input, textarea, select")) hideToast();
+  });
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener("resize", updateKeyboardLayout);
+    window.visualViewport.addEventListener("scroll", updateKeyboardLayout);
+  }
 }
 
 function openPhotoPicker(inputId) {
@@ -605,7 +631,11 @@ function renderPhotoAccessHint() {
   if (!hint) return;
   hint.textContent = location.protocol === "file:"
     ? "当前是文件打开模式，如不能打开相册，请用本地服务地址访问。"
-    : "点击后会打开相册，选中照片后再给出饮食提醒。";
+    : serviceStatus.photoAnalysis
+      ? "照片会由当前服务器分析，完成后请核对识别出的食物。"
+      : serviceStatus.checked
+        ? "照片识别服务正在准备中，您仍可先选择照片或改用文字。"
+        : "正在检查照片识别服务。";
 }
 
 function renderMode() {
@@ -637,13 +667,24 @@ function renderMealMode() {
   const recordHint = $("#recordHint");
   const text = $("#voiceText");
   const analyze = $("#voiceAnalyze");
-  if (!title || !hint || !recordHint || !text || !analyze) return;
+  const recorder = $(".voice-recorder");
+  const recordButton = $("#recordButton");
+  if (!title || !hint || !recordHint || !text || !analyze || !recorder || !recordButton) return;
+  const canUseServerSpeech = serviceStatus.speechRecognition === "server"
+    && navigator.mediaDevices?.getUserMedia
+    && window.MediaRecorder;
+  const canRecognizeSpeech = Boolean(window.isSecureContext && (canUseServerSpeech || window.SpeechRecognition || window.webkitSpeechRecognition));
+  recorder.classList.toggle("is-unavailable", !canRecognizeSpeech);
+  recordButton.hidden = false;
   title.textContent = isBefore ? "饭前先问问" : "饭后记一记";
   hint.textContent = isBefore ? "没听清可以打字，或改一改。" : "吃完可以补记，系统会顺手给下次建议。";
   recordHint.textContent = isBefore ? "比如：“这碗热干面我能吃吗？”" : "比如：“我吃了半碗米饭、一个鸡蛋、一份青菜。”";
   analyze.textContent = isBefore ? "帮我看看" : "帮我记录并判断";
   text.placeholder = isBefore ? "这碗热干面我能吃吗？" : "我吃了半碗米饭、一个鸡蛋、一份青菜";
   if (!listening) $("#recordLabel").textContent = "点一下，开口说";
+  if (!canRecognizeSpeech) {
+    recordHint.textContent = "当前测试地址不是安全连接，接入 HTTPS 后即可使用麦克风。文字输入仅作备用。";
+  }
 }
 
 function applyFontSize() {
@@ -1137,17 +1178,104 @@ function calculateBmi() {
   return { value: bmi.toFixed(1), label, calories: factor ? Math.max(0, Math.round(base * factor)) : "--" };
 }
 
-function toggleSpeech() {
+async function toggleSpeech() {
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!window.isSecureContext) {
+    const message = !window.isSecureContext
+      ? "当前临时地址是 HTTP，浏览器禁止使用麦克风。请通过 HTTPS 正式地址使用语音。"
+      : "当前浏览器不支持直接语音识别，请改用系统浏览器打开正式地址。";
+    $("#voiceResult").innerHTML = renderResultCard("yellow", "语音入口仍在", message);
+    return;
+  }
+  if (listening) {
+    if (mediaRecorder?.state === "recording") mediaRecorder.stop();
+    else if (recognition) recognition.stop();
+    return;
+  }
+  const canUseServerSpeech = serviceStatus.speechRecognition === "server"
+    && navigator.mediaDevices?.getUserMedia
+    && window.MediaRecorder;
+  if (canUseServerSpeech) {
+    await startServerSpeechRecording();
+    return;
+  }
   if (!SpeechRecognition) {
-    showToast("当前浏览器不能直接语音识别，可先用文字体验");
-    $("#voiceText").focus();
+    $("#voiceResult").innerHTML = renderResultCard("yellow", "请使用系统浏览器", "当前浏览器不支持麦克风语音识别，请用 Safari 或 Chrome 打开正式地址。 ");
     return;
   }
-  if (listening && recognition) {
-    recognition.stop();
+  startBrowserSpeechRecognition(SpeechRecognition);
+}
+
+async function startServerSpeechRecording() {
+  try {
+    mediaStream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+    const mimeType = ["audio/webm;codecs=opus", "audio/mp4", "audio/ogg;codecs=opus"]
+      .find((type) => MediaRecorder.isTypeSupported?.(type));
+    const recorder = new MediaRecorder(mediaStream, mimeType ? { mimeType } : undefined);
+    mediaRecorder = recorder;
+    recordedAudioChunks = [];
+    recorder.ondataavailable = (event) => {
+      if (event.data?.size) recordedAudioChunks.push(event.data);
+    };
+    recorder.onerror = () => {
+      if (recorder.state === "recording") recorder.stop();
+      else finishServerSpeechRecording(null, "录音没有完成，请再说一次。 ");
+    };
+    recorder.onstop = async () => {
+      const blob = recordedAudioChunks.length
+        ? new Blob(recordedAudioChunks, { type: recorder.mimeType || recordedAudioChunks[0].type })
+        : null;
+      await finishServerSpeechRecording(blob);
+    };
+    recorder.start(250);
+    listening = true;
+    speechHadError = false;
+    $("#recordButton").classList.add("is-listening");
+    $("#recordLabel").textContent = "正在听，再点一下就结束";
+    $("#voiceResult").innerHTML = renderResultCard("yellow", "正在听", "请直接说这一餐吃了什么，十秒内说完。 ");
+    scheduleSpeechStop(10_000);
+  } catch (error) {
+    stopMediaStream();
+    resetSpeechUi();
+    const denied = error?.name === "NotAllowedError" || error?.name === "SecurityError";
+    const message = denied ? "没有拿到麦克风权限，请在浏览器设置中允许慧食使用麦克风。" : "麦克风暂时无法使用，请再试一次。";
+    $("#voiceResult").innerHTML = renderResultCard("yellow", "无法开始录音", message);
+  }
+}
+
+async function finishServerSpeechRecording(blob, failureMessage = "") {
+  stopMediaStream();
+  listening = false;
+  clearTimeout(speechStopTimer);
+  $("#recordButton").classList.remove("is-listening");
+  mediaRecorder = null;
+  recordedAudioChunks = [];
+  if (!blob || blob.size < 256) {
+    renderMealMode();
+    $("#voiceResult").innerHTML = renderResultCard("yellow", "没有听清", failureMessage || "录音太短，请靠近手机再说一次。 ");
     return;
   }
+  $("#recordLabel").textContent = "正在识别，请稍等";
+  $("#voiceResult").innerHTML = renderResultCard("yellow", "正在识别", "语音只发送到当前慧食服务器，识别完成后立即删除。 ");
+  try {
+    const text = await requestSpeechTranscription(blob);
+    $("#voiceText").value = text;
+    renderMealMode();
+    await analyzeVoiceMeal();
+  } catch (error) {
+    renderMealMode();
+    $("#voiceResult").innerHTML = renderResultCard("yellow", "没有听清", error?.message || "语音识别暂时没有完成，请再说一次。 ");
+  }
+}
+
+function stopMediaStream() {
+  mediaStream?.getTracks?.().forEach((track) => track.stop());
+  mediaStream = null;
+}
+
+function startBrowserSpeechRecognition(SpeechRecognition) {
   recognition = new SpeechRecognition();
   recognition.lang = "zh-CN";
   recognition.interimResults = true;
@@ -1199,7 +1327,9 @@ function toggleSpeech() {
 function scheduleSpeechStop(delay) {
   clearTimeout(speechStopTimer);
   speechStopTimer = setTimeout(() => {
-    if (listening && recognition) recognition.stop();
+    if (!listening) return;
+    if (mediaRecorder?.state === "recording") mediaRecorder.stop();
+    else if (recognition) recognition.stop();
   }, delay);
 }
 
@@ -1208,14 +1338,42 @@ function resetSpeechUi() {
   clearTimeout(speechStopTimer);
   clearTimeout(voicePreviewTimer);
   recognition = null;
+  stopMediaStream();
   $("#recordButton").classList.remove("is-listening");
-  $("#recordLabel").textContent = "点一下，开口说";
+  renderMealMode();
 }
 
 async function analyzeVoiceMeal() {
   const text = $("#voiceText").value.trim();
   const localParsed = parseMealText(text);
-  if (localParsed.status === "empty" || localParsed.status === "not-meal") {
+  if (localParsed.status === "empty") {
+    renderUnclearResult("#voiceResult", "voice", true, localParsed);
+    return;
+  }
+  if (localParsed.status !== "food" && serviceStatus.textAnalysis) {
+    const button = $("#voiceAnalyze");
+    button.disabled = true;
+    button.setAttribute("aria-busy", "true");
+    $("#voiceResult").innerHTML = renderResultCard("yellow", "正在分析", "正在识别您输入的饭菜，请稍等。 ");
+    try {
+      const aiResult = await requestAiMealAnalysis(text);
+      const normalized = normalizeAiMealAnalysis(aiResult, localParsed);
+      if (normalized.status === "food" && normalized.items.length) {
+        renderVoiceConfirmation({ status: "food", items: normalized.items, originalText: text });
+        showToast("识别好了，请确认食物和份量");
+        return;
+      }
+      renderUnclearResult("#voiceResult", "voice", true, normalized);
+      return;
+    } catch {
+      renderUnclearResult("#voiceResult", "voice", true, localParsed);
+      return;
+    } finally {
+      button.disabled = false;
+      button.removeAttribute("aria-busy");
+    }
+  }
+  if (localParsed.status !== "food") {
     renderUnclearResult("#voiceResult", "voice", true, localParsed);
     return;
   }
@@ -1393,6 +1551,30 @@ async function requestAiMealAnalysis(text) {
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data.message || "AI 饮食分析失败");
     return data;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function requestSpeechTranscription(blob) {
+  const audio = await fileToDataUrl(blob);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 45_000);
+  try {
+    const response = await fetch("/api/transcribe-speech", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ audio, mimeType: blob.type || "audio/webm" }),
+      signal: controller.signal,
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.message || "语音识别暂时没有完成，请再说一次。 ");
+    const text = String(data.text || "").trim();
+    if (!text) throw new Error("没有听清楚，请靠近手机再说一次。 ");
+    return text;
+  } catch (error) {
+    if (error?.name === "AbortError") throw new Error("语音识别时间过长，请再说一句短一些的话。 ");
+    throw error;
   } finally {
     clearTimeout(timer);
   }
@@ -1948,13 +2130,17 @@ function renderEmergencyGuidance() {
 async function handlePhoto(event) {
   const file = event.target.files?.[0];
   if (!file) return;
+  await processPhoto(file, event.target);
+}
+
+async function processPhoto(file, input = null) {
   const preview = $("#photoPreview");
   const resultPanel = $("#photoResult");
   const reset = $("#photoReset");
   const picker = $("#albumOpenButton");
   if (!state.privacy?.accepted) {
     resultPanel.innerHTML = renderResultCard("red", "需要先确认数据说明", "请返回身份选择页，确认照片与健康档案的使用方式后再分析。");
-    event.target.value = "";
+    if (input) input.value = "";
     return;
   }
   if (!isImageFile(file)) {
@@ -1962,7 +2148,7 @@ async function handlePhoto(event) {
     preview.textContent = "请选择 JPG、PNG 或 WebP 饭菜照片";
     resultPanel.innerHTML = renderResultCard("red", "文件格式不支持", "系统只接受 JPG、PNG 或 WebP 图片。");
     if (reset) reset.hidden = false;
-    event.target.value = "";
+    if (input) input.value = "";
     return;
   }
   if (file.size > 5 * 1024 * 1024) {
@@ -1970,9 +2156,10 @@ async function handlePhoto(event) {
     preview.textContent = "照片超过 5MB，请选择较小的图片";
     resultPanel.innerHTML = renderResultCard("red", "照片太大", "为保护传输稳定性，请选择不超过 5MB 的饭菜照片。");
     if (reset) reset.hidden = false;
-    event.target.value = "";
+    if (input) input.value = "";
     return;
   }
+  lastPhotoFile = file;
   const url = URL.createObjectURL(file);
   preview.classList.add("has-image");
   preview.innerHTML = `<img src="${url}" alt="从相册选择的饭菜照片" />`;
@@ -2007,8 +2194,16 @@ async function handlePhoto(event) {
       picker.disabled = false;
       picker.removeAttribute("aria-disabled");
     }
-    event.target.value = "";
+    if (input) input.value = "";
   }
+}
+
+function retryLastPhoto() {
+  if (!lastPhotoFile) {
+    openPhotoPicker("photoInput");
+    return;
+  }
+  processPhoto(lastPhotoFile);
 }
 
 function isImageFile(file) {
@@ -2247,6 +2442,10 @@ function renderPhotoUnclear(reason, issue = "") {
       : "照片内容不够清楚";
   $("#photoResult").innerHTML = `
     ${renderResultCard("yellow", title, reason)}
+    <div class="recovery-actions" aria-label="下一步操作">
+      <button class="secondary-button" type="button" data-photo-retry>重新识别</button>
+      <button class="primary-button" type="button" data-photo-to-text>改用文字</button>
+    </div>
     ${renderSpeechControl()}
   `;
   scrollResultIntoView("#photoResult");
@@ -2287,7 +2486,7 @@ async function analyzePhotoMealWithModel(file) {
         status: "unclear",
         issue: data.error || "service-unavailable",
         reason: data.message || (response.status === 503
-          ? "照片识别服务尚未配置，请联系维护人员配置图像识别模型。"
+          ? "照片识别服务正在准备中，请稍后重试，或改用文字输入食物名称。"
           : "照片识别服务暂时不可用，请稍后重试。"),
       };
     }
@@ -2298,7 +2497,7 @@ async function analyzePhotoMealWithModel(file) {
       issue: error?.name === "AbortError" ? "upstream_timeout" : "service-unavailable",
       reason: error?.name === "AbortError"
         ? "照片识别超过 60 秒仍未完成，系统已停止等待。请稍后重试或改用“问一问”。"
-        : "照片识别请求没有完成，请检查服务配置后重试。",
+        : "照片识别请求没有完成，请稍后重试，或改用文字输入食物名称。",
     };
   } finally {
     clearTimeout(timer);
@@ -2631,13 +2830,49 @@ function changeMonth(offset) {
   saveState();
 }
 
+async function refreshServiceStatus() {
+  if (!location.protocol.startsWith("http")) {
+    serviceStatus.checked = true;
+    renderPhotoAccessHint();
+    return;
+  }
+  try {
+    const response = await fetch("/api/status", { headers: { Accept: "application/json" } });
+    const data = await response.json();
+    serviceStatus = {
+      photoAnalysis: Boolean(data.photoAnalysis),
+      textAnalysis: Boolean(data.textAnalysis),
+      speechRecognition: data.speechRecognition === "server" ? "server" : "browser",
+      checked: true,
+    };
+  } catch {
+    serviceStatus = { photoAnalysis: false, textAnalysis: false, speechRecognition: "browser", checked: true };
+  }
+  renderPhotoAccessHint();
+  renderMealMode();
+}
+
+function updateKeyboardLayout() {
+  if (!window.visualViewport) return;
+  largestViewportHeight = Math.max(largestViewportHeight, window.visualViewport.height);
+  const keyboardOpen = largestViewportHeight - window.visualViewport.height > 140;
+  document.documentElement.classList.toggle("keyboard-open", keyboardOpen);
+  if (keyboardOpen) hideToast();
+}
+
+function hideToast() {
+  clearTimeout(toastTimer);
+  const toast = $("#toast");
+  if (toast) toast.hidden = true;
+}
+
 function showToast(text) {
   const toast = $("#toast");
   toast.textContent = text;
   toast.hidden = false;
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => {
-    toast.hidden = true;
+    hideToast();
   }, 3000);
 }
 
