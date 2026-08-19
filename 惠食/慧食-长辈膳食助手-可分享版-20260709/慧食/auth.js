@@ -148,11 +148,11 @@ function createAuthService(options = {}) {
     runTransaction(database, () => {
       database.prepare(`
         INSERT INTO users
-        (id, phone, password_hash, password_salt, password_params, nickname, role, onboarding_completed,
+        (id, phone, password_hash, password_salt, password_params, nickname, role, active_mode, onboarding_completed,
          identity_status, identity_name_masked, identity_subject_hash, identity_provider,
          identity_reference, identity_verified_at, failed_login_attempts, locked_until,
          created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, '', 'elder', 0, 'unverified', NULL, NULL, NULL, NULL, NULL, 0, NULL, ?, ?)
+        VALUES (?, ?, ?, ?, ?, '', 'elder', 'elder', 0, 'unverified', NULL, NULL, NULL, NULL, NULL, 0, NULL, ?, ?)
       `).run(
         userId,
         phone,
@@ -219,9 +219,9 @@ function createAuthService(options = {}) {
 
   function updateRole(userId, input) {
     const role = input.role === "family" ? "family" : input.role === "elder" ? "elder" : null;
-    if (!role) throw new AuthError(400, "invalid_role", "请选择长辈或家人身份。");
+    if (!role) throw new AuthError(400, "invalid_role", "请选择本人使用或照护家人模式。");
     const result = database.prepare(`
-      UPDATE users SET role = ?, onboarding_completed = 1, updated_at = ? WHERE id = ?
+      UPDATE users SET active_mode = ?, onboarding_completed = 1, updated_at = ? WHERE id = ?
     `).run(role, now(), userId);
     if (!result.changes) throw new AuthError(401, "not_authenticated", "请先登录。");
     return getPublicUser(userId);
@@ -235,18 +235,19 @@ function createAuthService(options = {}) {
   }
 
   function getHealthData(viewerUserId, requestedElderUserId) {
-    const elderUserId = resolveHealthDataAccess(viewerUserId, requestedElderUserId);
+    const access = resolveHealthDataAccess(viewerUserId, requestedElderUserId);
+    const { elderUserId, permissions } = access;
     const elder = database.prepare("SELECT id, nickname, phone FROM users WHERE id = ?").get(elderUserId);
-    const storedProfile = database.prepare(`
+    const storedProfile = permissions.canViewProfile ? database.prepare(`
       SELECT profile_json, setup_complete, version, updated_at
       FROM health_profiles WHERE elder_user_id = ?
-    `).get(elderUserId);
-    const meals = database.prepare(`
+    `).get(elderUserId) : null;
+    const meals = permissions.canViewMeals ? database.prepare(`
       SELECT * FROM meal_records
       WHERE elder_user_id = ?
       ORDER BY recorded_at ASC, created_at ASC
       LIMIT 500
-    `).all(elderUserId).map(toPublicMealRecord);
+    `).all(elderUserId).map(toPublicMealRecord) : [];
     return {
       elder: {
         id: elder.id,
@@ -258,6 +259,7 @@ function createAuthService(options = {}) {
       profileVersion: Number(storedProfile?.version || 0),
       profileUpdatedAt: storedProfile?.updated_at || null,
       meals,
+      permissions,
     };
   }
 
@@ -332,7 +334,11 @@ function createAuthService(options = {}) {
   }
 
   function markMealHandled(viewerUserId, input) {
-    const elderUserId = resolveHealthDataAccess(viewerUserId, input.elderUserId);
+    const access = resolveHealthDataAccess(viewerUserId, input.elderUserId);
+    const { elderUserId, permissions } = access;
+    if (!permissions.canViewMeals || !permissions.canAcknowledgeAlerts) {
+      throw new AuthError(403, "alert_acknowledgement_not_shared", "长辈尚未授权当前账号确认提醒。");
+    }
     const recordId = normalizeRecordId(input.recordId);
     const result = database.prepare(`
       UPDATE meal_records SET handled = 1, updated_at = ?
@@ -346,28 +352,44 @@ function createAuthService(options = {}) {
     const viewer = database.prepare("SELECT id FROM users WHERE id = ?").get(viewerUserId);
     if (!viewer) throw new AuthError(401, "not_authenticated", "请先登录。");
     const elderUserId = String(requestedElderUserId || viewerUserId).trim();
-    if (elderUserId === viewerUserId) return viewerUserId;
+    if (elderUserId === viewerUserId) {
+      return {
+        elderUserId,
+        owner: true,
+        permissions: { canViewProfile: true, canViewMeals: true, canAcknowledgeAlerts: true },
+      };
+    }
     const relation = database.prepare(`
-      SELECT 1 FROM family_relations
+      SELECT can_view_profile, can_view_meals, can_acknowledge_alerts FROM family_relations
       WHERE elder_user_id = ? AND family_user_id = ?
     `).get(elderUserId, viewerUserId);
     if (!relation) throw new AuthError(403, "health_data_not_shared", "长辈尚未向当前账号共享健康数据。");
-    return elderUserId;
+    return {
+      elderUserId,
+      owner: false,
+      permissions: {
+        canViewProfile: Boolean(relation.can_view_profile),
+        canViewMeals: Boolean(relation.can_view_meals),
+        canAcknowledgeAlerts: Boolean(relation.can_acknowledge_alerts),
+      },
+    };
   }
 
   function getMealRecordForViewer(viewerUserId, elderUserId, recordId) {
-    resolveHealthDataAccess(viewerUserId, elderUserId);
+    const access = resolveHealthDataAccess(viewerUserId, elderUserId);
+    if (!access.permissions.canViewMeals) throw new AuthError(403, "meal_data_not_shared", "长辈尚未授权当前账号查看餐食记录。");
     const record = database.prepare("SELECT * FROM meal_records WHERE id = ? AND elder_user_id = ?").get(recordId, elderUserId);
     if (!record) throw new AuthError(404, "meal_not_found", "没有找到这条餐食记录。");
     return toPublicMealRecord(record);
   }
 
   function getFamilyStatus(userId) {
-    const user = database.prepare("SELECT id, role FROM users WHERE id = ?").get(userId);
+    const user = database.prepare("SELECT id, active_mode FROM users WHERE id = ?").get(userId);
     if (!user) throw new AuthError(401, "not_authenticated", "请先登录。");
     const linked = database.prepare(`
       SELECT family_relations.id, family_relations.elder_user_id, family_relations.family_user_id,
-        family_relations.created_at,
+        family_relations.created_at, family_relations.can_view_profile,
+        family_relations.can_view_meals, family_relations.can_acknowledge_alerts,
         elder.nickname AS elder_nickname, elder.phone AS elder_phone,
         family.nickname AS family_nickname, family.phone AS family_phone
       FROM family_relations
@@ -386,6 +408,11 @@ function createAuthService(options = {}) {
           phone: maskPhone(viewingAsElder ? relation.family_phone : relation.elder_phone),
         },
         createdAt: relation.created_at,
+        permissions: {
+          canViewProfile: Boolean(relation.can_view_profile),
+          canViewMeals: Boolean(relation.can_view_meals),
+          canAcknowledgeAlerts: Boolean(relation.can_acknowledge_alerts),
+        },
       };
     });
     const activeInvite = database.prepare(`
@@ -394,7 +421,8 @@ function createAuthService(options = {}) {
       ORDER BY created_at DESC LIMIT 1
     `).get(userId, now());
     return {
-      role: user.role,
+      role: user.active_mode,
+      activeMode: user.active_mode,
       linked,
       hasActiveInvite: Boolean(activeInvite),
       inviteExpiresAt: activeInvite?.expires_at || null,
@@ -402,9 +430,8 @@ function createAuthService(options = {}) {
   }
 
   function createFamilyInvite(userId) {
-    const user = database.prepare("SELECT id, role FROM users WHERE id = ?").get(userId);
+    const user = database.prepare("SELECT id FROM users WHERE id = ?").get(userId);
     if (!user) throw new AuthError(401, "not_authenticated", "请先登录。");
-    if (user.role !== "elder") throw new AuthError(403, "elder_role_required", "请先切换到长辈身份再生成绑定码。");
     const currentTime = now();
     database.prepare("DELETE FROM family_invites WHERE expires_at <= ? OR consumed_at IS NOT NULL").run(currentTime);
     database.prepare("DELETE FROM family_invites WHERE elder_user_id = ? AND consumed_at IS NULL").run(userId);
@@ -427,9 +454,8 @@ function createAuthService(options = {}) {
   }
 
   function bindFamily(userId, input) {
-    const user = database.prepare("SELECT id, role FROM users WHERE id = ?").get(userId);
+    const user = database.prepare("SELECT id FROM users WHERE id = ?").get(userId);
     if (!user) throw new AuthError(401, "not_authenticated", "请先登录。");
-    if (user.role !== "family") throw new AuthError(403, "family_role_required", "请先切换到家人身份再输入绑定码。");
     const code = String(input.code || "").trim();
     if (!/^\d{6}$/.test(code)) throw new AuthError(400, "invalid_family_code", "请输入 6 位家人绑定码。");
     const currentTime = now();
@@ -457,6 +483,21 @@ function createAuthService(options = {}) {
       WHERE id = ? AND (elder_user_id = ? OR family_user_id = ?)
     `).run(relationId, userId, userId);
     if (!result.changes) throw new AuthError(404, "relation_not_found", "没有找到该家人关系。");
+    return getFamilyStatus(userId);
+  }
+
+  function updateFamilyPermissions(userId, input) {
+    const relationId = String(input.relationId || "").trim();
+    if (!relationId) throw new AuthError(400, "relation_required", "请选择要设置的家人关系。");
+    const canViewProfile = input.canViewProfile !== false;
+    const canViewMeals = input.canViewMeals !== false;
+    const canAcknowledgeAlerts = canViewMeals && input.canAcknowledgeAlerts !== false;
+    const result = database.prepare(`
+      UPDATE family_relations
+      SET can_view_profile = ?, can_view_meals = ?, can_acknowledge_alerts = ?
+      WHERE id = ? AND elder_user_id = ?
+    `).run(canViewProfile ? 1 : 0, canViewMeals ? 1 : 0, canAcknowledgeAlerts ? 1 : 0, relationId, userId);
+    if (!result.changes) throw new AuthError(403, "permission_change_not_allowed", "只有长辈账号可以调整共享范围。");
     return getFamilyStatus(userId);
   }
 
@@ -583,6 +624,7 @@ function createAuthService(options = {}) {
     markMealHandled,
     updateProfile,
     updateRole,
+    updateFamilyPermissions,
     unbindFamily,
     verifyCurrentIdentity,
   };
@@ -701,6 +743,12 @@ async function handleAuthRequest(service, req, res, pathname, helpers) {
       sendJson(res, 200, service.unbindFamily(session.user.id, body));
       return;
     }
+    if (pathname === "/api/auth/family/permissions") {
+      const session = service.getSession(token);
+      if (!session) throw new AuthError(401, "not_authenticated", "请先登录。");
+      sendJson(res, 200, service.updateFamilyPermissions(session.user.id, body));
+      return;
+    }
     if (pathname === "/api/auth/identity/verify") {
       const session = service.getSession(token);
       if (!session) throw new AuthError(401, "not_authenticated", "请先登录。");
@@ -738,6 +786,7 @@ function migrate(database) {
       password_params TEXT NOT NULL,
       nickname TEXT NOT NULL,
       role TEXT NOT NULL CHECK (role IN ('elder', 'family')),
+      active_mode TEXT NOT NULL DEFAULT 'elder' CHECK (active_mode IN ('elder', 'family')),
       onboarding_completed INTEGER NOT NULL DEFAULT 0,
       identity_status TEXT NOT NULL DEFAULT 'unverified',
       identity_name_masked TEXT,
@@ -788,6 +837,9 @@ function migrate(database) {
       elder_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       family_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       created_at INTEGER NOT NULL,
+      can_view_profile INTEGER NOT NULL DEFAULT 1,
+      can_view_meals INTEGER NOT NULL DEFAULT 1,
+      can_acknowledge_alerts INTEGER NOT NULL DEFAULT 1,
       UNIQUE(elder_user_id, family_user_id),
       CHECK(elder_user_id <> family_user_id)
     );
@@ -821,6 +873,20 @@ function migrate(database) {
   const userColumns = database.prepare("PRAGMA table_info(users)").all();
   if (!userColumns.some((column) => column.name === "onboarding_completed")) {
     database.exec("ALTER TABLE users ADD COLUMN onboarding_completed INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!userColumns.some((column) => column.name === "active_mode")) {
+    database.exec("ALTER TABLE users ADD COLUMN active_mode TEXT NOT NULL DEFAULT 'elder'");
+    database.exec("UPDATE users SET active_mode = role WHERE role IN ('elder', 'family')");
+  }
+  const relationColumns = database.prepare("PRAGMA table_info(family_relations)").all();
+  if (!relationColumns.some((column) => column.name === "can_view_profile")) {
+    database.exec("ALTER TABLE family_relations ADD COLUMN can_view_profile INTEGER NOT NULL DEFAULT 1");
+  }
+  if (!relationColumns.some((column) => column.name === "can_view_meals")) {
+    database.exec("ALTER TABLE family_relations ADD COLUMN can_view_meals INTEGER NOT NULL DEFAULT 1");
+  }
+  if (!relationColumns.some((column) => column.name === "can_acknowledge_alerts")) {
+    database.exec("ALTER TABLE family_relations ADD COLUMN can_acknowledge_alerts INTEGER NOT NULL DEFAULT 1");
   }
 }
 
@@ -1054,7 +1120,8 @@ function toPublicUser(user) {
     id: user.id,
     phone: maskPhone(user.phone),
     nickname: user.nickname,
-    role: user.role,
+    role: user.active_mode || user.role,
+    activeMode: user.active_mode || user.role,
     onboardingComplete: Boolean(user.onboarding_completed),
     identityStatus: user.identity_status,
     identityName: user.identity_name_masked || null,

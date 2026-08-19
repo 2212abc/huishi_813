@@ -29,7 +29,7 @@
     <div class="app-shell">
       <header class="topbar">
         <div class="brand-block">
-          <p class="eyebrow" id="modeLabel">长辈端</p>
+          <p class="eyebrow" id="modeLabel">本人记录</p>
           <h1 class="brand-logo" aria-label="慧食">
             <span class="brand-mark" aria-hidden="true">
               <img class="brand-icon" src="./assets/logo.png" alt="" />
@@ -37,7 +37,7 @@
             <span class="brand-word">慧食</span>
           </h1>
         </div>
-        <button class="mode-button" id="modeSwitch" type="button">切换身份</button>
+        <button class="mode-button" id="modeSwitch" type="button">切换方式</button>
       </header>
 
       <main id="main" tabindex="-1">
@@ -304,7 +304,7 @@
           </section>
           <div class="family-top-actions">
             <button class="secondary-button family-action-button" id="bindFamily" type="button">家人绑定</button>
-            <button class="secondary-button family-action-button" id="familyProfileHelp" type="button" data-family-action="profile">帮长辈完善档案</button>
+            <button class="secondary-button family-action-button" id="familyProfileHelp" type="button" data-family-action="profile">查看共享权限</button>
           </div>
           <div class="family-grid" id="familyGrid">
             <div class="mini-card green"><span>今日记录</span><strong>0 餐</strong></div>
@@ -351,24 +351,24 @@
     </div>
     <div class="role-modal" id="roleModal" hidden role="dialog" aria-modal="true" aria-labelledby="roleModalTitle">
       <div class="role-sheet">
-        <button class="modal-close role-modal-close" id="closeRoleModal" type="button" aria-label="关闭身份选择"><svg><use href="#i-close"></use></svg></button>
+        <button class="modal-close role-modal-close" id="closeRoleModal" type="button" aria-label="关闭使用方式选择"><svg><use href="#i-close"></use></svg></button>
         <p class="eyebrow">进入慧食</p>
-        <h2 id="roleModalTitle">请选择本次使用身份</h2>
-        <p class="role-modal-intro">登录后再选择，之后也可以在首页顶部随时切换。</p>
-        <div class="role-grid" role="radiogroup" aria-label="使用身份">
+        <h2 id="roleModalTitle">本次怎么使用慧食</h2>
+        <p class="role-modal-intro">使用方式只调整界面，不会改变账号或共享权限。</p>
+        <div class="role-grid" role="radiogroup" aria-label="本次使用方式">
           <button class="role-card is-active" type="button" data-session-role="elder" role="radio" aria-checked="true">
             <span><svg><use href="#i-user"></use></svg></span>
-            <strong>我是长辈</strong>
-            <small>记录饮食，语音问一问</small>
+            <strong>记录自己的饮食</strong>
+            <small>语音问一问、拍照和健康档案</small>
           </button>
           <button class="role-card" type="button" data-session-role="family" role="radio" aria-checked="false">
             <span><svg><use href="#i-family"></use></svg></span>
-            <strong>我是家人</strong>
-            <small>查看记录，协助完善档案</small>
+            <strong>照护家人</strong>
+            <small>查看已获授权的长辈记录</small>
           </button>
         </div>
         <p class="auth-error" id="roleError" role="alert" hidden></p>
-        <button class="primary-button role-confirm" id="confirmRole" type="button">确认身份</button>
+        <button class="primary-button role-confirm" id="confirmRole" type="button">确认使用方式</button>
         <button class="text-button role-logout" id="roleLogout" type="button">退出当前账号</button>
       </div>
     </div>

@@ -240,7 +240,7 @@ let lastSyncedNickname = "";
 let familyBinding = { loaded: false, linked: [], hasActiveInvite: false, inviteExpiresAt: null };
 let familyBindingBusy = false;
 let activeFamilyInvite = null;
-let sharedHealthData = { loaded: false, elder: null, profile: null, setupComplete: false, meals: [], error: "" };
+let sharedHealthData = { loaded: false, elder: null, profile: null, setupComplete: false, meals: [], permissions: null, error: "" };
 let healthProfileSyncTimer = null;
 let healthDataHydrating = false;
 
@@ -463,7 +463,7 @@ function bindEvents() {
   if (familyProfileHelp) familyProfileHelp.addEventListener("click", (event) => {
     event.preventDefault();
     event.stopPropagation();
-    openFamilyProfileWizard();
+    void openBindModal();
   });
   $("#bindFamily").addEventListener("click", openBindModal);
   $("#closeBindModal").addEventListener("click", closeBindModal);
@@ -836,17 +836,17 @@ async function refreshSharedHealthData() {
   if (!state.auth.loggedIn || state.auth.role !== "family") return;
   const relation = (familyBinding.linked || []).find((item) => item.relationship === "elder");
   if (!relation?.user?.id) {
-    sharedHealthData = { loaded: true, elder: null, profile: null, setupComplete: false, meals: [], error: "" };
+    sharedHealthData = { loaded: true, elder: null, profile: null, setupComplete: false, meals: [], permissions: null, error: "" };
     renderFamily();
     return;
   }
-  sharedHealthData = { loaded: false, elder: relation.user, profile: null, setupComplete: false, meals: [], error: "" };
+  sharedHealthData = { loaded: false, elder: relation.user, profile: null, setupComplete: false, meals: [], permissions: relation.permissions || null, error: "" };
   renderFamily();
   try {
     const data = await authApi(`/api/auth/health-data?elderUserId=${encodeURIComponent(relation.user.id)}`);
     sharedHealthData = { ...data, loaded: true, error: "" };
   } catch (error) {
-    sharedHealthData = { loaded: true, elder: relation.user, profile: null, setupComplete: false, meals: [], error: error.message || "共享数据读取失败" };
+    sharedHealthData = { loaded: true, elder: relation.user, profile: null, setupComplete: false, meals: [], permissions: relation.permissions || null, error: error.message || "共享数据读取失败" };
   }
   renderFamily();
   if (state.screen === "report") {
@@ -890,7 +890,7 @@ function completeAuthentication(user, acceptedPrivacy, promptForRole = false) {
   renderAll();
   goToScreen(state.screen, false);
   familyBinding = { loaded: false, linked: [], hasActiveInvite: false, inviteExpiresAt: null };
-  sharedHealthData = { loaded: false, elder: null, profile: null, setupComplete: false, meals: [], error: "" };
+  sharedHealthData = { loaded: false, elder: null, profile: null, setupComplete: false, meals: [], permissions: null, error: "" };
   activeFamilyInvite = null;
   void refreshFamilyBindingStatus();
   if (role === "elder") void hydrateOwnHealthData();
@@ -937,7 +937,7 @@ function renderRoleSelection() {
     button.setAttribute("aria-checked", selected ? "true" : "false");
   });
   $("#confirmRole").disabled = roleBusy;
-  $("#confirmRole").textContent = roleBusy ? "正在保存…" : "确认身份";
+  $("#confirmRole").textContent = roleBusy ? "正在保存…" : "确认使用方式";
 }
 
 async function confirmRoleSelection() {
@@ -948,9 +948,9 @@ async function confirmRoleSelection() {
     const result = await authApi("/api/auth/role", { role: pendingRole });
     closeRoleModal(false);
     completeAuthentication(result.user, false, false);
-    showToast(pendingRole === "family" ? "已进入家人端" : "已进入长辈端");
+    showToast(pendingRole === "family" ? "已进入家人照护" : "已进入本人记录");
   } catch (error) {
-    $("#roleError").textContent = error.message || "身份保存失败，请重试。";
+    $("#roleError").textContent = error.message || "使用方式保存失败，请重试。";
     $("#roleError").hidden = false;
   } finally {
     roleBusy = false;
@@ -982,7 +982,7 @@ async function handleLogout() {
   state.screen = "login";
   state.wizardOpen = false;
   familyBinding = { loaded: false, linked: [], hasActiveInvite: false, inviteExpiresAt: null };
-  sharedHealthData = { loaded: false, elder: null, profile: null, setupComplete: false, meals: [], error: "" };
+  sharedHealthData = { loaded: false, elder: null, profile: null, setupComplete: false, meals: [], permissions: null, error: "" };
   activeFamilyInvite = null;
   saveState();
   renderAll();
@@ -1038,8 +1038,8 @@ function renderPhotoAccessHint() {
 
 function renderMode() {
   const isFamily = state.mode === "family";
-  $("#modeLabel").textContent = isFamily ? "家人端" : "长辈端";
-  $("#modeSwitch").textContent = "切换身份";
+  $("#modeLabel").textContent = isFamily ? "家人照护" : "本人记录";
+  $("#modeSwitch").textContent = "切换方式";
 }
 
 function setMealMode(mode) {
@@ -3054,6 +3054,9 @@ function renderFamily() {
   const linkedAccount = isRemoteFamilyView
     ? (familyBinding.linked || []).find((item) => item.relationship === "elder")
     : familyBinding.linked?.[0] || null;
+  const permissions = isRemoteFamilyView && linkedAccount
+    ? (sharedHealthData.permissions || linkedAccount.permissions || { canViewProfile: true, canViewMeals: true, canAcknowledgeAlerts: true })
+    : { canViewProfile: true, canViewMeals: true, canAcknowledgeAlerts: true };
   if (isRemoteFamilyView && linkedAccount && !sharedHealthData.loaded) {
     hero.innerHTML = `<div><span>已绑定 · ${escapeHtml(linkedAccount.user?.nickname || linkedAccount.user?.phone || "长辈")}</span><strong>正在同步健康档案</strong><small>请稍候，正在读取长辈设备上传的记录。</small></div><div class="score-badge">同步中</div>`;
     grid.innerHTML = '<div class="mini-card green"><span>今日记录</span><strong>--</strong></div><div class="mini-card red"><span>红色警告</span><strong>--</strong></div><div class="mini-card yellow"><span>黄色提醒</span><strong>--</strong></div><div class="mini-card blue"><span>待查看</span><strong>--</strong></div>';
@@ -3067,7 +3070,9 @@ function renderFamily() {
     bindFamilyMonitorEvents(monitor);
     return;
   }
-  const profile = isRemoteFamilyView && sharedHealthData.profile ? sharedHealthData.profile : state.profile;
+  const profile = isRemoteFamilyView
+    ? (permissions.canViewProfile ? sharedHealthData.profile : null)
+    : state.profile;
   const history = getActiveMealHistory();
   const todayKey = formatLocalDateKey(new Date());
   const todayRecords = history.filter((record) => record?.dateKey === todayKey);
@@ -3075,7 +3080,9 @@ function renderFamily() {
   const yellowCount = todayRecords.filter((record) => record.level === "yellow").length;
   const unresolvedCount = todayRecords.filter((record) => record.level !== "green" && !record.handled).length;
   const latest = [...history].reverse().find((record) => record.level !== "green" && !record.handled) || history.at(-1) || null;
-  const profileLabel = profile.age ? `${profile.age} 岁` : "基础信息未完成";
+  const profileLabel = isRemoteFamilyView && linkedAccount && !permissions.canViewProfile
+    ? "长辈未授权查看"
+    : profile?.age ? `${profile.age} 岁` : "基础信息未完成";
   const linkedName = linkedAccount?.user?.nickname || linkedAccount?.user?.phone || "";
   const bindingLabel = linkedAccount ? `已绑定 · ${linkedName}` : "尚未绑定账号";
 
@@ -3083,16 +3090,28 @@ function renderFamily() {
     <div>
       <span>${escapeHtml(bindingLabel)}</span>
       <strong>健康档案 · ${escapeHtml(profileLabel)}</strong>
-      <small>${latest ? `最近记录：${escapeHtml(latest.updated || "时间未知")}` : "尚无真实餐食记录"}</small>
+      <small>${!permissions.canViewMeals ? "长辈未授权查看餐食记录" : latest ? `最近记录：${escapeHtml(latest.updated || "时间未知")}` : "尚无真实餐食记录"}</small>
     </div>
     <div class="score-badge">${isRemoteFamilyView && linkedAccount ? "云端" : linkedAccount ? "已绑定" : "本机"}</div>
   `;
   grid.innerHTML = `
-    <div class="mini-card green"><span>今日记录</span><strong>${todayRecords.length} 餐</strong></div>
-    <div class="mini-card red"><span>红色警告</span><strong>${redCount} 条</strong></div>
-    <div class="mini-card yellow"><span>黄色提醒</span><strong>${yellowCount} 次</strong></div>
-    <div class="mini-card blue"><span>待查看</span><strong>${unresolvedCount} 条</strong></div>
+    <div class="mini-card green"><span>今日记录</span><strong>${permissions.canViewMeals ? `${todayRecords.length} 餐` : "--"}</strong></div>
+    <div class="mini-card red"><span>红色警告</span><strong>${permissions.canViewMeals ? `${redCount} 条` : "--"}</strong></div>
+    <div class="mini-card yellow"><span>黄色提醒</span><strong>${permissions.canViewMeals ? `${yellowCount} 次` : "--"}</strong></div>
+    <div class="mini-card blue"><span>待查看</span><strong>${permissions.canViewMeals ? `${unresolvedCount} 条` : "--"}</strong></div>
   `;
+  if (isRemoteFamilyView && linkedAccount && !permissions.canViewMeals) {
+    monitor.innerHTML = `
+      <div class="section-title"><h3>真实记录</h3><span>未授权</span></div>
+      <div class="monitor-empty">
+        <strong>长辈尚未共享餐食记录</strong>
+        <span>共享范围由长辈账号控制。绑定关系仍然有效。</span>
+      </div>
+      <button class="secondary-button trend-button" type="button" data-family-action="profile">查看共享权限</button>
+    `;
+    bindFamilyMonitorEvents(monitor);
+    return;
+  }
   if (!latest) {
     monitor.innerHTML = `
       <div class="section-title"><h3>真实记录</h3><span>${isRemoteFamilyView && linkedAccount ? "云端已同步" : "云端保存"}</span></div>
@@ -3119,7 +3138,7 @@ function renderFamily() {
       <span>${escapeHtml(latest.advice || "请结合实际食物和医生建议核对。")}</span>
     </div>
     <div class="family-actions">
-      ${latest.level !== "green" && !latest.handled ? '<button class="secondary-button action-done" type="button" data-family-action="done">标记已查看</button>' : ""}
+      ${latest.level !== "green" && !latest.handled && permissions.canAcknowledgeAlerts ? '<button class="secondary-button action-done" type="button" data-family-action="done">标记已查看</button>' : ""}
     </div>
     <button class="secondary-button trend-button" type="button" data-family-action="report">查看记录日历</button>
   `;
@@ -3153,8 +3172,7 @@ async function handleFamilyAction(action) {
   }
   if (action === "call" || action === "meal") return showToast("当前本机试用尚未启用跨设备联系或推送");
   if (action === "profile") {
-    if (state.auth.role === "family") showToast("为避免误改，请让长辈在自己的账号中完善档案");
-    else openFamilyProfileWizard();
+    await openBindModal();
     return;
   }
   if (action === "done") {
@@ -3262,7 +3280,7 @@ function renderBindModal() {
   ` : `
     <p class="eyebrow">家人绑定</p>
     <h2 id="bindTitle">邀请家人加入</h2>
-    <p class="bind-hint">绑定码 10 分钟内有效且只能使用一次。家人需登录自己的账号并切换到家人身份。</p>
+    <p class="bind-hint">绑定码 10 分钟内有效且只能使用一次。家人登录自己的账号后即可输入，界面使用方式不会影响授权。</p>
     ${linkedMarkup}
     ${inviteIsActive ? `
       <section class="bind-invite" aria-label="当前绑定码">
@@ -3281,13 +3299,43 @@ function renderFamilyRelations(relations) {
   return `
     <section class="bind-relations" aria-label="已绑定账号">
       <h3>已绑定账号</h3>
-      ${relations.map((relation) => `
-        <div class="bind-relation-row">
-          <div><strong>${escapeHtml(relation.user?.nickname || (relation.relationship === "elder" ? "长辈" : "家人"))}</strong><small>${escapeHtml(relation.user?.phone || "")}</small></div>
-          <button class="text-button" type="button" data-bind-action="unbind" data-relation-id="${escapeHtml(relation.id)}">解除</button>
-        </div>
-      `).join("")}
+      ${relations.map((relation) => {
+        const permissions = relation.permissions || { canViewProfile: true, canViewMeals: true, canAcknowledgeAlerts: true };
+        const controlsSharing = relation.relationship === "family";
+        const permissionSummary = [
+          permissions.canViewProfile ? "健康档案" : "",
+          permissions.canViewMeals ? "餐食记录" : "",
+          permissions.canAcknowledgeAlerts ? "确认提醒" : "",
+        ].filter(Boolean).join("、") || "未共享健康数据";
+        return `
+          <div class="bind-relation-item">
+            <div class="bind-relation-row">
+              <div><strong>${escapeHtml(relation.user?.nickname || (relation.relationship === "elder" ? "长辈" : "家人"))}</strong><small>${escapeHtml(relation.user?.phone || "")}</small></div>
+              <button class="text-button" type="button" data-bind-action="unbind" data-relation-id="${escapeHtml(relation.id)}">解除</button>
+            </div>
+            ${controlsSharing ? `
+              <p class="bind-permission-title">允许这位家人查看</p>
+              <div class="bind-permission-grid" aria-label="共享权限">
+                ${renderPermissionToggle(relation, "canViewProfile", "健康档案")}
+                ${renderPermissionToggle(relation, "canViewMeals", "餐食记录")}
+                ${renderPermissionToggle(relation, "canAcknowledgeAlerts", "确认提醒", !permissions.canViewMeals)}
+              </div>
+            ` : `<p class="bind-permission-summary">长辈已授权：${escapeHtml(permissionSummary)}</p>`}
+          </div>
+        `;
+      }).join("")}
     </section>
+  `;
+}
+
+function renderPermissionToggle(relation, permission, label, disabled = false) {
+  const enabled = relation.permissions ? Boolean(relation.permissions[permission]) : true;
+  return `
+    <button class="bind-permission-toggle${enabled ? " is-enabled" : ""}" type="button"
+      data-bind-action="permission" data-relation-id="${escapeHtml(relation.id)}"
+      data-permission="${permission}" aria-pressed="${enabled ? "true" : "false"}" ${disabled ? "disabled" : ""}>
+      <span aria-hidden="true">${enabled ? "✓" : ""}</span>${escapeHtml(label)}
+    </button>
   `;
 }
 
@@ -3303,6 +3351,29 @@ async function handleBindModalClick(event) {
   if (action === "generate") return generateFamilyInvite();
   if (action === "bind") return submitFamilyBinding();
   if (action === "unbind") return unbindFamilyRelation(button.dataset.relationId);
+  if (action === "permission") return updateFamilyPermission(button.dataset.relationId, button.dataset.permission);
+}
+
+async function updateFamilyPermission(relationId, permission) {
+  const relation = (familyBinding.linked || []).find((item) => item.id === relationId && item.relationship === "family");
+  if (!relation || !["canViewProfile", "canViewMeals", "canAcknowledgeAlerts"].includes(permission)) return;
+  const current = relation.permissions || { canViewProfile: true, canViewMeals: true, canAcknowledgeAlerts: true };
+  const next = { ...current, [permission]: !current[permission] };
+  if (!next.canViewMeals) next.canAcknowledgeAlerts = false;
+  familyBindingBusy = true;
+  renderBindModal();
+  let errorMessage = "";
+  try {
+    familyBinding = { ...(await authApi("/api/auth/family/permissions", { relationId, ...next })), loaded: true };
+    showToast("共享权限已更新");
+  } catch (error) {
+    errorMessage = error.message || "共享权限更新失败，请重试。";
+  } finally {
+    familyBindingBusy = false;
+    renderBindModal();
+    renderFamily();
+    if (errorMessage) setBindError(errorMessage);
+  }
 }
 
 async function generateFamilyInvite() {
@@ -3350,7 +3421,7 @@ async function unbindFamilyRelation(relationId) {
   let errorMessage = "";
   try {
     familyBinding = { ...(await authApi("/api/auth/family/unbind", { relationId })), loaded: true };
-    sharedHealthData = { loaded: true, elder: null, profile: null, setupComplete: false, meals: [], error: "" };
+    sharedHealthData = { loaded: true, elder: null, profile: null, setupComplete: false, meals: [], permissions: null, error: "" };
     renderFamily();
     showToast("家人绑定已解除");
   } catch (error) {

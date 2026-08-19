@@ -51,7 +51,7 @@ test("phone and Chinese ID validation reject malformed values", () => {
   assert.equal(isValidChineseIdChecksum("110105194912310021"), false);
 });
 
-test("registration stores hashes and defers role, nickname, and identity until after signup", async () => {
+test("registration stores hashes and defers usage mode, nickname, and identity until after signup", async () => {
   const phone = "13800138000";
   await service.requestSms({ phone, purpose: "register", ipAddress: "127.0.0.1" });
   const result = await service.register({
@@ -68,6 +68,7 @@ test("registration stores hashes and defers role, nickname, and identity until a
 
   const roleUser = service.updateRole(result.user.id, { role: "family" });
   assert.equal(roleUser.role, "family");
+  assert.equal(roleUser.activeMode, "family");
   assert.equal(roleUser.onboardingComplete, true);
   const profileUser = service.updateProfile(result.user.id, { nickname: "王阿姨" });
   assert.equal(profileUser.nickname, "王阿姨");
@@ -154,6 +155,7 @@ test("HTTP auth handler issues a secure cookie and restores the session", async 
   const role = await callAuthHandler("/api/auth/role", "POST", { role: "family" }, cookieHeaders);
   assert.equal(role.status, 200);
   assert.equal(role.body.user.role, "family");
+  assert.equal(role.body.user.activeMode, "family");
   assert.equal(role.body.user.onboardingComplete, true);
   const profile = await callAuthHandler("/api/auth/profile", "POST", { nickname: "照护人" }, cookieHeaders);
   assert.equal(profile.status, 200);
@@ -221,10 +223,46 @@ test("family invite codes create a persistent relation and are single-use", () =
   assert.equal(shared.meals.length, 1);
   assert.equal(shared.meals[0].foods[0], "花生");
   const unrelated = service.login({ phone: "13800138000", password: "new-meal-safe-2026" }).user;
+
+  service.updateRole(family.id, { role: "elder" });
+  assert.equal(service.getFamilyStatus(family.id).activeMode, "elder");
+  assert.equal(service.getHealthData(family.id, elder.id).meals.length, 1);
+  service.updateRole(unrelated.id, { role: "family" });
   assert.throws(
     () => service.getHealthData(unrelated.id, elder.id),
     (error) => error.code === "health_data_not_shared",
   );
+
+  const relationId = bound.linked[0].id;
+  const limited = service.updateFamilyPermissions(elder.id, {
+    relationId,
+    canViewProfile: false,
+    canViewMeals: false,
+    canAcknowledgeAlerts: true,
+  });
+  assert.deepEqual(limited.linked[0].permissions, {
+    canViewProfile: false,
+    canViewMeals: false,
+    canAcknowledgeAlerts: false,
+  });
+  const restrictedData = service.getHealthData(family.id, elder.id);
+  assert.equal(restrictedData.profile, null);
+  assert.deepEqual(restrictedData.meals, []);
+  assert.throws(
+    () => service.markMealHandled(family.id, { elderUserId: elder.id, recordId: "meal-family-sync-1" }),
+    (error) => error.code === "alert_acknowledgement_not_shared",
+  );
+  assert.throws(
+    () => service.updateFamilyPermissions(family.id, { relationId, canViewMeals: true }),
+    (error) => error.code === "permission_change_not_allowed",
+  );
+  service.updateRole(elder.id, { role: "family" });
+  service.updateFamilyPermissions(elder.id, {
+    relationId,
+    canViewProfile: true,
+    canViewMeals: true,
+    canAcknowledgeAlerts: true,
+  });
   const handled = service.markMealHandled(family.id, { elderUserId: elder.id, recordId: "meal-family-sync-1" });
   assert.equal(handled.record.handled, true);
   assert.throws(

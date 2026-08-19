@@ -49,6 +49,7 @@ const AUTH_API_PATHS = new Set([
   "/api/auth/family/invite",
   "/api/auth/family/bind",
   "/api/auth/family/unbind",
+  "/api/auth/family/permissions",
   "/api/auth/identity/verify",
 ]);
 const API_PATHS = new Set([
