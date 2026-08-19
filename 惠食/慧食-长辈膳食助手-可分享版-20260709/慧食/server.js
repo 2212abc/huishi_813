@@ -174,7 +174,8 @@ function assertSafeRuntimeConfiguration(environment = process.env) {
   const nodeEnv = String(environment.NODE_ENV || "development").toLowerCase();
   const host = String(environment.HOST || "127.0.0.1").trim().toLowerCase();
   const production = nodeEnv === "production";
-  const devMode = parseEnvBoolean(environment.AUTH_DEV_MODE, false);
+  const configuredDevMode = parseEnvBoolean(environment.AUTH_DEV_MODE, nodeEnv !== "production");
+  const devMode = nodeEnv !== "production" && configuredDevMode;
   const errors = [];
   const port = Number(environment.PORT || 8787);
   const rateLimit = Number(environment.API_RATE_LIMIT || 30);
@@ -189,7 +190,7 @@ function assertSafeRuntimeConfiguration(environment = process.env) {
   }
 
   if (production) {
-    if (devMode) errors.push("AUTH_DEV_MODE must be false in production");
+    if (configuredDevMode) errors.push("AUTH_DEV_MODE must be false in production");
     if (String(environment.AUTH_SECRET || "").length < 32) errors.push("AUTH_SECRET must contain at least 32 characters in production");
     if (environment.COOKIE_SECURE !== "true") errors.push("COOKIE_SECURE must be true in production");
     if (!parseEnvBoolean(environment.TRUST_PROXY, false)) errors.push("TRUST_PROXY must be true behind the production HTTPS proxy");

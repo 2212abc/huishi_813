@@ -21,6 +21,7 @@ before(() => {
     now: () => currentTime,
     environment: {
       NODE_ENV: "test",
+      AUTH_DEV_MODE: "false",
       IDENTITY_VERIFICATION_REQUIRED: "true",
     },
     smsProvider: {
@@ -294,6 +295,8 @@ test("development mode can register without SMS but never bypasses password reco
   try {
     assert.equal(devService.getConfig().registrationSmsRequired, false);
     assert.equal(devService.getConfig().passwordResetSmsRequired, true);
+    assert.equal(devService.getConfig().passwordResetAvailable, false);
+    assert.equal(devService.getConfig().testMode, true);
     const registered = await devService.register({ phone: "13500135000", password: "dev-password-135" });
     assert.equal(registered.user.phone, "135****5000");
     await assert.rejects(

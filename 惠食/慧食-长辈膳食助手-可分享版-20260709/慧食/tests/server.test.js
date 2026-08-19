@@ -94,9 +94,11 @@ test("auth status is anonymous and never exposes server secrets", async () => {
   assert.deepEqual(body.config, {
     smsReady: false,
     smsMode: "disabled",
-    smsVerificationRequired: true,
-    registrationSmsRequired: true,
+    smsVerificationRequired: false,
+    registrationSmsRequired: false,
     passwordResetSmsRequired: true,
+    passwordResetAvailable: false,
+    testMode: true,
     identityReady: false,
     identityRequired: false,
   });

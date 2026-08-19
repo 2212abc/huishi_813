@@ -54,7 +54,9 @@ const FOODS = [
   { name: "鸡蛋", salt: 0.2, carb: "低", tags: ["优质蛋白"] },
   { name: "番茄炒蛋", salt: 0.8, carb: "低", tags: ["优质蛋白"] },
   { name: "牛奶", salt: 0.2, carb: "中", tags: ["优质蛋白", "钙"] },
-  { name: "清蒸鱼", salt: 0.5, carb: "低", tags: ["优质蛋白"] },
+  { name: "鱼", salt: 0.6, carb: "低", tags: ["优质蛋白"] },
+  { name: "清蒸鱼", salt: 0.5, carb: "低", tags: ["优质蛋白", "清淡烹饪"] },
+  { name: "红烧鱼", salt: 1.4, carb: "低", tags: ["优质蛋白", "高盐", "油脂偏高"] },
   { name: "鸡胸肉", salt: 0.4, carb: "低", tags: ["优质蛋白"] },
   { name: "牛肉", salt: 0.6, carb: "低", tags: ["优质蛋白"] },
   { name: "鸡腿", salt: 0.7, carb: "低", tags: ["优质蛋白", "油脂偏高"] },
@@ -106,7 +108,9 @@ const FOOD_ALIASES = [
   { food: "鸡蛋", terms: ["鸡蛋", "水煮蛋", "煎蛋", "一个蛋"] },
   { food: "番茄炒蛋", terms: ["番茄炒蛋", "西红柿炒蛋", "炒蛋"] },
   { food: "牛奶", terms: ["牛奶", "低脂奶", "一杯奶"] },
-  { food: "清蒸鱼", terms: ["清蒸鱼", "鲈鱼", "鱼"] },
+  { food: "红烧鱼", terms: ["红烧鱼", "红烧鲫鱼", "红烧鲤鱼", "红烧鲈鱼"] },
+  { food: "清蒸鱼", terms: ["清蒸鱼", "清蒸鲈鱼", "蒸鱼"] },
+  { food: "鱼", terms: ["鱼", "鱼肉", "鲈鱼", "鲫鱼", "鲤鱼", "草鱼"] },
   { food: "鸡胸肉", terms: ["鸡胸肉", "鸡肉"] },
   { food: "牛肉", terms: ["牛肉"] },
   { food: "鸡腿", terms: ["鸡腿"] },
@@ -139,6 +143,8 @@ const COMPOUND_SUPPRESSIONS = {
   "方便面": ["面条"],
   "炒饭": ["米饭"],
   "番茄炒蛋": ["鸡蛋"],
+  "红烧鱼": ["鱼"],
+  "清蒸鱼": ["鱼"],
   "排骨汤": ["牛肉"],
   "外卖快餐": ["米饭"],
   "汉堡": ["面包", "牛肉"],
@@ -173,7 +179,7 @@ const DEFAULT_STATE = {
     onboardingComplete: false,
   },
   ui: {
-    fontSize: "standard",
+    fontSize: "large",
   },
   mealMode: "before",
   mode: "elder",
@@ -237,7 +243,17 @@ let serviceStatus = {
   speechRecognition: "browser",
   checked: false,
 };
-let authConfig = { smsReady: false, smsMode: "disabled", registrationSmsRequired: true, passwordResetSmsRequired: true, identityReady: false, identityRequired: false, checked: false };
+let authConfig = {
+  smsReady: false,
+  smsMode: "disabled",
+  registrationSmsRequired: true,
+  passwordResetSmsRequired: true,
+  passwordResetAvailable: false,
+  testMode: false,
+  identityReady: false,
+  identityRequired: false,
+  checked: false,
+};
 let authBusy = false;
 let authCodeCooldown = 0;
 let authCodeTimer = null;
@@ -394,7 +410,20 @@ function bindEvents() {
       setAuthMode(button.dataset.authMode);
     });
   });
-  $("#forgotPassword").addEventListener("click", () => setAuthMode(state.auth.authMode === "reset" ? "login" : "reset"));
+  $$("[data-auth-font-size]").forEach((button) => {
+    button.addEventListener("click", () => setFontSize(button.dataset.authFontSize));
+  });
+  $("#forgotPassword").addEventListener("click", () => {
+    if (state.auth.authMode === "reset") {
+      setAuthMode("login");
+      return;
+    }
+    if (!isPasswordResetAvailable()) {
+      setAuthError("测试版暂不提供密码找回，请联系测试管理员处理。");
+      return;
+    }
+    setAuthMode("reset");
+  });
   $("#sendAuthCode").addEventListener("click", requestAuthCode);
   $$("[data-session-role]").forEach((button) => {
     button.addEventListener("click", () => selectPendingRole(button.dataset.sessionRole));
@@ -623,10 +652,15 @@ async function handleAuthSubmit(event) {
 function renderAuth() {
   const isAuthScreen = state.screen === "login" || !state.auth?.loggedIn;
   $(".app-shell").classList.toggle("is-auth-screen", isAuthScreen);
-  const mode = ["login", "register", "reset"].includes(state.auth?.authMode) ? state.auth.authMode : "login";
+  let mode = ["login", "register", "reset"].includes(state.auth?.authMode) ? state.auth.authMode : "login";
+  const passwordResetAvailable = isPasswordResetAvailable();
+  if (mode === "reset" && authConfig.checked && !passwordResetAvailable) {
+    mode = "login";
+    state.auth.authMode = "login";
+  }
   const needsSms = mode === "register"
     ? (authConfig.registrationSmsRequired ?? authConfig.smsVerificationRequired) !== false
-    : mode === "reset" ? authConfig.passwordResetSmsRequired !== false : false;
+    : mode === "reset" && passwordResetAvailable;
   $$("[data-auth-mode]").forEach((button) => button.classList.toggle("is-active", button.dataset.authMode === mode));
   $$("[data-auth-register]").forEach((node) => { node.hidden = mode !== "register"; });
   $$("[data-auth-code]").forEach((node) => { node.hidden = !needsSms; });
@@ -647,22 +681,24 @@ function renderAuth() {
   $("#authPassword").autocomplete = mode === "login" ? "current-password" : "new-password";
   $("#authPassword").placeholder = mode === "login" ? "请输入密码" : "8 至 72 个字符";
   $("#authSubmit").textContent = mode === "register" ? "完成注册" : mode === "reset" ? "更新密码" : "登录";
-  $("#forgotPassword").hidden = mode === "register";
+  $("#forgotPassword").hidden = mode === "register" || !passwordResetAvailable;
   $("#forgotPassword").textContent = mode === "reset" ? "返回登录" : "忘记密码";
   $("#authHelper").textContent = mode === "login"
-    ? "账号密码经过安全哈希处理，服务器不会保存明文密码。"
+    ? passwordResetAvailable
+      ? "账号密码经过安全哈希处理，服务器不会保存明文密码。"
+      : "测试版暂不提供密码找回，请妥善保存密码。"
     : mode === "register" && !needsSms
-      ? "当前为测试模式，无需短信验证码；密码请勿使用连续或重复数字。"
+      ? "一个手机号只能注册一个账号；请设置容易记住但不连续、不重复的密码。"
       : mode === "register"
         ? "短信验证码 5 分钟内有效；密码请勿使用连续或重复数字。"
         : "更新密码后，其他设备上的登录会自动失效。";
   const serviceNotice = $("#authServiceNotice");
   if (serviceNotice) {
-    serviceNotice.hidden = mode === "login" || (authConfig.checked && needsSms && authConfig.smsReady && authConfig.smsMode !== "debug");
+    serviceNotice.hidden = mode === "login"
+      || (mode === "register" && !needsSms)
+      || (authConfig.checked && needsSms && authConfig.smsReady && authConfig.smsMode !== "debug");
     serviceNotice.textContent = !authConfig.checked
       ? "正在检查账号服务…"
-      : !needsSms
-        ? "当前为测试注册模式：无需短信验证码，手机号会作为账号唯一标识。找回密码仍需短信验证。"
       : !authConfig.smsReady
         ? "短信服务正在配置，暂时不能注册或找回密码。"
         : authConfig.smsMode === "debug"
@@ -673,8 +709,13 @@ function renderAuth() {
   $("#authSubmit").disabled = authBusy || (needsSms && authConfig.checked && !authConfig.smsReady);
 }
 
+function isPasswordResetAvailable() {
+  return Boolean(authConfig.passwordResetAvailable ?? authConfig.smsReady);
+}
+
 function setAuthMode(mode) {
-  state.auth.authMode = ["login", "register", "reset"].includes(mode) ? mode : "login";
+  const requested = ["login", "register", "reset"].includes(mode) ? mode : "login";
+  state.auth.authMode = requested === "reset" && authConfig.checked && !isPasswordResetAvailable() ? "login" : requested;
   setAuthError("");
   $("#authCode").value = "";
   $("#authPassword").value = "";
@@ -1097,6 +1138,11 @@ function renderMealMode() {
 function applyFontSize() {
   const size = ["standard", "large", "xlarge"].includes(state.ui?.fontSize) ? state.ui.fontSize : "standard";
   document.documentElement.dataset.fontSize = size;
+  $$("[data-auth-font-size]").forEach((button) => {
+    const active = button.dataset.authFontSize === size;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-pressed", active ? "true" : "false");
+  });
 }
 
 function setFontSize(size) {
@@ -2272,9 +2318,9 @@ function evaluateMeal(items, parsed = {}) {
   const directConditionHits = [];
 
   if ((hasCondition("hypertension") || hasCondition("kidney")) && (saltShare >= 1 || tags.includes("高盐"))) {
-    severeTexts.push(`${hasCondition("kidney") ? "慢性肾病" : "高血压"}：这餐盐分很重，按一天 ${saltLimit} 克盐额度算，今天盐额度基本花完了。`);
+    severeTexts.push(`${hasCondition("kidney") ? "慢性肾病" : "高血压"}：这类菜通常盐分偏高，先停下确认用盐和酱料，避免继续加汤汁。`);
   } else if ((hasCondition("hypertension") || hasCondition("kidney")) && (saltShare >= 0.5 || hasSoup)) {
-    riskTexts.push(`${hasCondition("kidney") ? "慢性肾病" : "高血压"}：这餐盐分占了一天额度的不少，汤汁、酱料和咸菜先少碰。`);
+    riskTexts.push(`${hasCondition("kidney") ? "慢性肾病" : "高血压"}：这类菜的盐分需要留意，汤汁、酱料和咸菜先少碰。`);
   }
 
   if (hasCondition("diabetes") && hasSweet) {
@@ -2309,6 +2355,7 @@ function evaluateMeal(items, parsed = {}) {
     hasSweet,
     hasHighOil,
     hasHighPurine,
+    hasHighSalt: tags.includes("高盐"),
     directConditionHits,
   });
 
@@ -2336,7 +2383,7 @@ function evaluateMeal(items, parsed = {}) {
   return {
     level: "green",
     title: "这顿整体稳妥",
-    safety: `没有发现过敏黑名单，也没有明显慢病冲突。按单餐估算，盐分约 ${totalSalt.toFixed(1)} 克。`,
+    safety: "没有发现过敏黑名单，也没有明显慢病冲突。盐分风险按常见做法判断，仍要以实际用盐和酱料为准。",
     nutrition: buildNutritionText(items, totalSalt, hasVegetable, hasProtein, highCarbItems, { hasSweet, hasHighOil, hasHighPurine }),
     advice: buildMealAdvice({ tags, hasVegetable, hasProtein, highCarbItems, riskTexts: [], totalSalt, saltLimit }),
     basis,
@@ -2516,9 +2563,11 @@ function getMealResultCopy(evaluation, mode = "before") {
 }
 
 function getMealSaltText(items) {
-  const totalSalt = dedupeFoodMatches(items).reduce((sum, item) => sum + Number(item.salt || 0) * Number(item.portionFactor || 1), 0);
+  const uniqueItems = dedupeFoodMatches(items);
+  const totalSalt = uniqueItems.reduce((sum, item) => sum + Number(item.salt || 0) * Number(item.portionFactor || 1), 0);
+  const hasHighSalt = uniqueItems.some((item) => item.tags?.includes("高盐"));
   const saltLimit = hasCondition("hypertension") || hasCondition("kidney") ? 5 : 6;
-  return `这餐盐分约 ${totalSalt.toFixed(1)} 克 · 今日建议不超过 ${saltLimit} 克`;
+  return `盐分风险：${describeSaltRisk(totalSalt, saltLimit, hasHighSalt)} · 实际以用盐、酱料和份量为准`;
 }
 
 function handleMealResultAction(action) {
@@ -2799,11 +2848,11 @@ function buildMealAdvice({ tags, hasVegetable, hasProtein, highCarbItems, riskTe
   return "下一餐继续保持少油少盐，饭菜种类不用太复杂。";
 }
 
-function buildJudgementBasis({ names, profileConditionNames, totalSalt, saltLimit, highCarbItems, hasSweet, hasHighOil, hasHighPurine, directConditionHits }) {
+function buildJudgementBasis({ names, profileConditionNames, totalSalt, saltLimit, highCarbItems, hasSweet, hasHighOil, hasHighPurine, hasHighSalt, directConditionHits }) {
   const parts = [
     `识别到：${names.join("、")}`,
     `档案红线：${profileConditionNames.length ? profileConditionNames.join("、") : "暂无慢病红线"}`,
-    `盐分约 ${totalSalt.toFixed(1)} 克，按一天 ${saltLimit} 克盐额度看，${describeSaltBudget(totalSalt, saltLimit)}`,
+    `盐分风险（按常见做法估算）：${describeSaltRisk(totalSalt, saltLimit, hasHighSalt)}，实际取决于用盐、酱料和份量`,
   ];
   if (highCarbItems.length) parts.push(`主食类：${highCarbItems.join("、")}`);
   if (hasSweet) parts.push("含甜饮或甜食");
@@ -2813,12 +2862,12 @@ function buildJudgementBasis({ names, profileConditionNames, totalSalt, saltLimi
   return `${parts.join("；")}。`;
 }
 
-function describeSaltBudget(totalSalt, saltLimit) {
+function describeSaltRisk(totalSalt, saltLimit, hasHighSalt = false) {
+  if (hasHighSalt) return "偏高";
   const share = totalSalt / saltLimit;
-  if (share >= 1) return "今天盐额度基本花完了";
-  if (share >= 0.75) return "已经用了大半";
-  if (share >= 0.45) return "占了一部分";
-  return "占得不多";
+  if (share >= 0.75) return "偏高";
+  if (share >= 0.35) return "需留意";
+  return "较低";
 }
 
 function getProfileConditionNames() {

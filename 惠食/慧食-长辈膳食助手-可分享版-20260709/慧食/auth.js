@@ -31,8 +31,10 @@ function createAuthService(options = {}) {
   const smsProvider = options.smsProvider || createSmsProvider(environment, nodeEnv);
   const identityProvider = options.identityProvider || createIdentityProvider(environment, nodeEnv);
   const identityRequired = parseBoolean(environment.IDENTITY_VERIFICATION_REQUIRED, false);
-  const registrationSmsRequired = !(nodeEnv !== "production" && parseBoolean(environment.AUTH_DEV_MODE, false));
+  const testMode = nodeEnv !== "production" && parseBoolean(environment.AUTH_DEV_MODE, true);
+  const registrationSmsRequired = !testMode;
   const passwordResetSmsRequired = true;
+  const passwordResetAvailable = Boolean(smsProvider.ready);
   const secureCookies = environment.COOKIE_SECURE === "false" ? false : environment.COOKIE_SECURE === "true" ? true : "auto";
 
   migrate(database);
@@ -53,6 +55,8 @@ function createAuthService(options = {}) {
       smsVerificationRequired: registrationSmsRequired,
       registrationSmsRequired,
       passwordResetSmsRequired,
+      passwordResetAvailable,
+      testMode,
       identityReady: Boolean(identityProvider.ready),
       identityRequired,
     };
