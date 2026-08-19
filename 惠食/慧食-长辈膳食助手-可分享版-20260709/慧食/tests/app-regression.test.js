@@ -50,7 +50,18 @@ test("large text modes provide materially different accessible sizes", () => {
   assert.match(styles, /html\[data-font-size="large"\]\s*\{[^}]*font-size:\s*19px/s);
   assert.match(styles, /html\[data-font-size="xlarge"\]\s*\{[^}]*font-size:\s*22px/s);
   assert.match(styles, /html\[data-font-size="xlarge"\][^{]*\.quick-grid[\s\S]*?grid-template-columns:\s*1fr/);
+  assert.match(styles, /html\[data-font-size="xlarge"\][^{]*\.legal-document-links[\s\S]*?grid-template-columns:\s*1fr/);
   assert.match(indexHtml, /class="skip-link" href="#main"/);
+});
+
+test("privacy consent and account rights remain reachable in the frontend", () => {
+  assert.match(indexHtml, /id="legalModal"/);
+  assert.match(indexHtml, /id="accountDataModal"/);
+  assert.match(indexHtml, /href="\/?privacy\.html"/);
+  assert.match(indexHtml, /href="\/?terms\.html"/);
+  assert.match(appSource, /\/api\/auth\/legal-consent/);
+  assert.match(appSource, /\/api\/auth\/data-export/);
+  assert.match(appSource, /\/api\/auth\/account-delete/);
 });
 
 test("meal guidance does not present generic salt estimates as precise measurements", () => {

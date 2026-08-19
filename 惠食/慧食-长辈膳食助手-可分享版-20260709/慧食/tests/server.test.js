@@ -44,11 +44,31 @@ test("only allowlisted frontend files are public", async () => {
   assert.equal(home.status, 200);
   assert.match(home.headers.get("content-security-policy"), /default-src 'self'/);
   assert.equal(home.headers.get("x-frame-options"), "DENY");
+  assert.ok(home.headers.get("x-request-id"));
+
+  for (const pathname of ["/privacy.html", "/terms.html"]) {
+    const response = await fetch(`${baseUrl}${pathname}`);
+    assert.equal(response.status, 200, pathname);
+  }
 
   for (const pathname of ["/.env", "/server.js", "/README.md", "/assets/demo-meal.jpg"]) {
     const response = await fetch(`${baseUrl}${pathname}`);
     assert.equal(response.status, 404, pathname);
   }
+});
+
+test("liveness and readiness distinguish process and database health", async () => {
+  const liveness = await fetch(`${baseUrl}/healthz`);
+  assert.equal(liveness.status, 200);
+  assert.deepEqual(await liveness.json(), { ok: true, service: "huishi", status: "alive" });
+  const readiness = await fetch(`${baseUrl}/readyz`);
+  assert.equal(readiness.status, 200);
+  assert.deepEqual(await readiness.json(), {
+    ok: true,
+    service: "huishi",
+    status: "ready",
+    checks: { database: "ok" },
+  });
 });
 
 test("API rejects cross-origin requests before model access", async () => {
@@ -101,6 +121,8 @@ test("auth status is anonymous and never exposes server secrets", async () => {
     testMode: true,
     identityReady: false,
     identityRequired: false,
+    privacyVersion: "2026-08-19",
+    termsVersion: "2026-08-19",
   });
   assert.doesNotMatch(JSON.stringify(body), /test-api-secret/);
 });
@@ -152,6 +174,10 @@ test("unsafe public and production runtime configurations fail before startup", 
     SMS_PROVIDER: "webhook",
     SMS_WEBHOOK_URL: "https://sms.example.test/send",
     ALLOW_PHOTO_DISABLED: "true",
+    PUBLIC_BASE_URL: "https://huishi123.cn",
+    LEGAL_DOCUMENTS_APPROVED: "true",
+    LEGAL_OPERATOR_NAME: "Huishi Test Operator",
+    LEGAL_CONTACT: "privacy@example.test",
   }));
 });
 

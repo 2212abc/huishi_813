@@ -1,0 +1,28 @@
+[Unit]
+Description=Huishi senior meal assistant
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=huishi
+Group=huishi
+WorkingDirectory=/opt/huishi
+EnvironmentFile=/etc/huishi/huishi.env
+ExecStart=/usr/bin/node /opt/huishi/server.js
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+KillSignal=SIGTERM
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/huishi /var/backups/huishi
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=huishi
+
+[Install]
+WantedBy=multi-user.target

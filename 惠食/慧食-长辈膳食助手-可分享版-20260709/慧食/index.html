@@ -92,6 +92,10 @@
               <span class="consent-check" aria-hidden="true"><svg><use href="#i-check"></use></svg></span>
               <span>我已了解：账号信息会安全存储在慧食服务器；只有主动使用语音、文字、照片分析或实名认证时，对应数据才会发送给已配置的服务商。</span>
             </button>
+            <p class="legal-links" data-auth-register hidden>
+              注册即表示已阅读 <a href="/privacy.html" target="_blank" rel="noopener">隐私政策</a>
+              和 <a href="/terms.html" target="_blank" rel="noopener">用户协议</a>。
+            </p>
             <button class="primary-button auth-submit" id="authSubmit" type="submit">登录</button>
             <button class="auth-forgot" id="forgotPassword" type="button">忘记密码</button>
             <p class="auth-helper" id="authHelper">账号密码经过加密处理，服务器不会保存明文密码。</p>
@@ -379,6 +383,39 @@
         <p class="auth-error" id="roleError" role="alert" hidden></p>
         <button class="primary-button role-confirm" id="confirmRole" type="button">确认使用方式</button>
         <button class="text-button role-logout" id="roleLogout" type="button">退出当前账号</button>
+      </div>
+    </div>
+    <div class="role-modal" id="legalModal" hidden role="dialog" aria-modal="true" aria-labelledby="legalModalTitle">
+      <div class="role-sheet legal-sheet">
+        <p class="eyebrow">隐私与数据</p>
+        <h2 id="legalModalTitle">请确认最新协议</h2>
+        <p class="role-modal-intro">惠食会在服务器保存账号、健康档案、餐食记录和家人授权。语音、文字或照片只在你主动使用对应功能时处理。</p>
+        <div class="legal-document-links">
+          <a class="secondary-button" href="/privacy.html" target="_blank" rel="noopener">查看隐私政策</a>
+          <a class="secondary-button" href="/terms.html" target="_blank" rel="noopener">查看用户协议</a>
+        </div>
+        <p class="auth-error" id="legalError" role="alert" hidden></p>
+        <button class="primary-button" id="confirmLegalConsent" type="button">同意并继续</button>
+        <button class="text-button" id="legalLogout" type="button">不同意，退出账号</button>
+      </div>
+    </div>
+    <div class="role-modal" id="accountDataModal" hidden role="dialog" aria-modal="true" aria-labelledby="accountDataTitle">
+      <div class="role-sheet account-data-sheet">
+        <button class="modal-close" id="closeAccountDataModal" type="button" aria-label="关闭账号数据管理"><svg><use href="#i-close"></use></svg></button>
+        <p class="eyebrow">账号数据</p>
+        <h2 id="accountDataTitle">导出或删除数据</h2>
+        <p class="role-modal-intro">导出文件包含你的账号资料、健康档案、餐食记录、家人关系和审计事件，不包含密码或会话令牌。</p>
+        <button class="primary-button" id="exportAccountData" type="button">导出我的全部数据</button>
+        <button class="secondary-button danger-outline" id="revealAccountDelete" type="button">申请删除账号</button>
+        <div class="account-delete-panel" id="accountDeletePanel" hidden>
+          <strong>删除后无法恢复</strong>
+          <p>账号、健康档案、餐食记录、会话和家人绑定都会被删除。</p>
+          <label class="auth-label" for="accountDeletePassword">输入当前密码
+            <input id="accountDeletePassword" type="password" autocomplete="current-password" maxlength="72" />
+          </label>
+          <button class="danger-button" id="confirmAccountDelete" type="button">永久删除账号</button>
+        </div>
+        <p class="auth-error" id="accountDataError" role="alert" hidden></p>
       </div>
     </div>
     <div class="toast" id="toast" hidden role="status" aria-live="polite"></div>

@@ -4,7 +4,21 @@ const os = require("node:os");
 const path = require("node:path");
 const { after, before, test } = require("node:test");
 const { DatabaseSync } = require("node:sqlite");
-const { AuthError, createAuthService, handleAuthRequest, isValidChineseIdChecksum, normalizePhone } = require("../auth");
+const {
+  AuthError,
+  DEFAULT_PRIVACY_VERSION,
+  DEFAULT_TERMS_VERSION,
+  createAuthService,
+  handleAuthRequest,
+  isValidChineseIdChecksum,
+  normalizePhone,
+} = require("../auth");
+
+const LEGAL_ACCEPTANCE = {
+  acceptLegal: true,
+  privacyVersion: DEFAULT_PRIVACY_VERSION,
+  termsVersion: DEFAULT_TERMS_VERSION,
+};
 
 let service;
 let dbPath;
@@ -56,6 +70,7 @@ test("registration stores hashes and defers usage mode, nickname, and identity u
   const phone = "13800138000";
   await service.requestSms({ phone, purpose: "register", ipAddress: "127.0.0.1" });
   const result = await service.register({
+    ...LEGAL_ACCEPTANCE,
     phone,
     code: sentCodes.get(`${phone}:register`),
     password: "meal-safe-2026",
@@ -99,12 +114,14 @@ test("SMS codes are single-use and requests are throttled", async () => {
   await service.requestSms({ phone, purpose: "register", ipAddress: "127.0.0.2" });
   const code = sentCodes.get(`${phone}:register`);
   await service.register({
+    ...LEGAL_ACCEPTANCE,
     phone,
     code,
     password: "safe-password-139",
   });
   await assert.rejects(
     service.register({
+      ...LEGAL_ACCEPTANCE,
       phone: "13700137000",
       code,
       password: "safe-password-137",
@@ -142,6 +159,7 @@ test("HTTP auth handler issues a secure cookie and restores the session", async 
   currentTime += 61_000;
   await service.requestSms({ phone, purpose: "register", ipAddress: "127.0.0.3" });
   const register = await callAuthHandler("/api/auth/register", "POST", {
+    ...LEGAL_ACCEPTANCE,
     phone,
     code: sentCodes.get(`${phone}:register`),
     password: "safe-password-136",
@@ -297,10 +315,14 @@ test("development mode can register without SMS but never bypasses password reco
     assert.equal(devService.getConfig().passwordResetSmsRequired, true);
     assert.equal(devService.getConfig().passwordResetAvailable, false);
     assert.equal(devService.getConfig().testMode, true);
-    const registered = await devService.register({ phone: "13500135000", password: "dev-password-135" });
+    await assert.rejects(
+      devService.register({ phone: "13500135000", password: "dev-password-135" }),
+      (error) => error.code === "legal_consent_required",
+    );
+    const registered = await devService.register({ ...LEGAL_ACCEPTANCE, phone: "13500135000", password: "dev-password-135" });
     assert.equal(registered.user.phone, "135****5000");
     await assert.rejects(
-      devService.register({ phone: "13500135000", password: "another-password-135" }),
+      devService.register({ ...LEGAL_ACCEPTANCE, phone: "13500135000", password: "another-password-135" }),
       (error) => error.code === "phone_already_registered",
     );
     assert.throws(
@@ -308,6 +330,24 @@ test("development mode can register without SMS but never bypasses password reco
       (error) => error.code === "invalid_sms_code",
     );
     assert.equal(devService.login({ phone: "13500135000", password: "dev-password-135" }).user.id, registered.user.id);
+    assert.equal(registered.user.legalAcceptedCurrent, true);
+    devService.saveHealthProfile(registered.user.id, {
+      setupComplete: true,
+      profile: { nickname: "测试用户", age: 70, conditions: ["hypertension"] },
+    });
+    const exported = devService.exportAccountData(registered.user.id);
+    assert.equal(exported.account.phone, "13500135000");
+    assert.equal(exported.healthProfile.profile.age, 70);
+    assert.doesNotMatch(JSON.stringify(exported), /password_hash|password_salt|token_hash/);
+    assert.throws(
+      () => devService.deleteAccount(registered.user.id, { password: "wrong-password" }),
+      (error) => error.code === "invalid_credentials",
+    );
+    assert.deepEqual(devService.deleteAccount(registered.user.id, { password: "dev-password-135" }), { deleted: true });
+    assert.throws(
+      () => devService.login({ phone: "13500135000", password: "dev-password-135" }),
+      (error) => error.code === "invalid_credentials",
+    );
   } finally {
     devService.close();
     fs.rmSync(directory, { recursive: true, force: true });
@@ -323,6 +363,7 @@ test("COOKIE_SECURE=true is enforced for sessions behind an internal HTTP hop", 
   });
   try {
     const registered = await callAuthHandler("/api/auth/register", "POST", {
+      ...LEGAL_ACCEPTANCE,
       phone: "13300133000",
       password: "secure-cookie-password-133",
     }, {}, secureService);

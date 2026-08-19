@@ -11,6 +11,9 @@ const SMS_COOLDOWN_MS = 60 * 1000;
 const FAMILY_INVITE_TTL_MS = 10 * 60 * 1000;
 const PASSWORD_KEY_LENGTH = 32;
 const PASSWORD_SCRYPT_OPTIONS = { N: 16384, r: 8, p: 1, maxmem: 64 * 1024 * 1024 };
+const DEFAULT_PRIVACY_VERSION = "2026-08-19";
+const DEFAULT_TERMS_VERSION = "2026-08-19";
+const DEFAULT_AUDIT_RETENTION_DAYS = 180;
 
 class AuthError extends Error {
   constructor(status, code, message) {
@@ -36,6 +39,9 @@ function createAuthService(options = {}) {
   const passwordResetSmsRequired = true;
   const passwordResetAvailable = Boolean(smsProvider.ready);
   const secureCookies = environment.COOKIE_SECURE === "false" ? false : environment.COOKIE_SECURE === "true" ? true : "auto";
+  const privacyVersion = String(environment.PRIVACY_POLICY_VERSION || DEFAULT_PRIVACY_VERSION).slice(0, 40);
+  const termsVersion = String(environment.TERMS_VERSION || DEFAULT_TERMS_VERSION).slice(0, 40);
+  const auditRetentionDays = clampInteger(environment.AUDIT_RETENTION_DAYS, 30, 730, DEFAULT_AUDIT_RETENTION_DAYS);
 
   migrate(database);
   const fakePasswordRecord = hashPassword("not-a-real-password", randomBytes);
@@ -59,6 +65,8 @@ function createAuthService(options = {}) {
       testMode,
       identityReady: Boolean(identityProvider.ready),
       identityRequired,
+      privacyVersion,
+      termsVersion,
     };
   }
 
@@ -148,6 +156,7 @@ function createAuthService(options = {}) {
   async function register(input, context = {}) {
     const phone = normalizePhone(input.phone);
     const password = validatePassword(input.password, phone);
+    validateLegalAcceptance(input);
     if (database.prepare("SELECT 1 FROM users WHERE phone = ?").get(phone)) {
       throw new AuthError(409, "phone_already_registered", "该手机号已经注册，请直接登录。");
     }
@@ -162,18 +171,24 @@ function createAuthService(options = {}) {
         (id, phone, password_hash, password_salt, password_params, nickname, role, active_mode, onboarding_completed,
          identity_status, identity_name_masked, identity_subject_hash, identity_provider,
          identity_reference, identity_verified_at, failed_login_attempts, locked_until,
+         privacy_version, privacy_accepted_at, terms_version, terms_accepted_at,
          created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, '', 'elder', 'elder', 0, 'unverified', NULL, NULL, NULL, NULL, NULL, 0, NULL, ?, ?)
+        VALUES (?, ?, ?, ?, ?, '', 'elder', 'elder', 0, 'unverified', NULL, NULL, NULL, NULL, NULL, 0, NULL, ?, ?, ?, ?, ?, ?)
       `).run(
         userId,
         phone,
         passwordRecord.hash,
         passwordRecord.salt,
         JSON.stringify(passwordRecord.params),
+        privacyVersion,
+        currentTime,
+        termsVersion,
+        currentTime,
         currentTime,
         currentTime,
       );
       if (sms) database.prepare("UPDATE sms_codes SET consumed_at = ? WHERE id = ?").run(currentTime, sms.id);
+      writeAudit("account.register", { userId, context });
     });
     const session = createSession(userId, context);
     return { user: getPublicUser(userId), ...session };
@@ -194,19 +209,21 @@ function createAuthService(options = {}) {
           UPDATE users SET failed_login_attempts = ?, locked_until = ?, updated_at = ? WHERE id = ?
         `).run(lockedUntil ? 0 : attempts, lockedUntil, currentTime, user.id);
       }
+      writeAudit("account.login", { userId: user?.id, context, outcome: "denied" });
       throw new AuthError(401, "invalid_credentials", "手机号或密码不正确。");
     }
     database.prepare(`
       UPDATE users SET failed_login_attempts = 0, locked_until = NULL, updated_at = ? WHERE id = ?
     `).run(currentTime, user.id);
-    return { user: toPublicUser(user), ...createSession(user.id, context) };
+    writeAudit("account.login", { userId: user.id, context });
+    return { user: toPublicUser(user, privacyVersion, termsVersion), ...createSession(user.id, context) };
   }
 
   async function requestPasswordReset(input, context = {}) {
     return requestSms({ phone: input.phone, purpose: "password_reset", ipAddress: context.ipAddress });
   }
 
-  function resetPassword(input) {
+  function resetPassword(input, context = {}) {
     const phone = normalizePhone(input.phone);
     const password = validatePassword(input.password, phone);
     const sms = passwordResetSmsRequired ? findValidSms(phone, "password_reset", input.code) : null;
@@ -224,24 +241,29 @@ function createAuthService(options = {}) {
       `).run(passwordRecord.hash, passwordRecord.salt, JSON.stringify(passwordRecord.params), currentTime, user.id);
       if (sms) database.prepare("UPDATE sms_codes SET consumed_at = ? WHERE id = ?").run(currentTime, sms.id);
       database.prepare("DELETE FROM sessions WHERE user_id = ?").run(user.id);
+      writeAudit("account.password_reset", { userId: user.id, context });
     });
     return { reset: true };
   }
 
-  function updateRole(userId, input) {
+  function updateRole(userId, input, context = {}) {
+    requireCurrentLegalConsent(userId);
     const role = input.role === "family" ? "family" : input.role === "elder" ? "elder" : null;
     if (!role) throw new AuthError(400, "invalid_role", "请选择本人使用或照护家人模式。");
     const result = database.prepare(`
       UPDATE users SET active_mode = ?, onboarding_completed = 1, updated_at = ? WHERE id = ?
     `).run(role, now(), userId);
     if (!result.changes) throw new AuthError(401, "not_authenticated", "请先登录。");
+    writeAudit("account.mode_changed", { userId, context, metadata: { mode: role } });
     return getPublicUser(userId);
   }
 
-  function updateProfile(userId, input) {
+  function updateProfile(userId, input, context = {}) {
+    requireCurrentLegalConsent(userId);
     const nickname = normalizeNickname(input.nickname);
     const result = database.prepare("UPDATE users SET nickname = ?, updated_at = ? WHERE id = ?").run(nickname, now(), userId);
     if (!result.changes) throw new AuthError(401, "not_authenticated", "请先登录。");
+    writeAudit("account.profile_updated", { userId, context });
     return getPublicUser(userId);
   }
 
@@ -274,7 +296,8 @@ function createAuthService(options = {}) {
     };
   }
 
-  function saveHealthProfile(userId, input) {
+  function saveHealthProfile(userId, input, context = {}) {
+    requireCurrentLegalConsent(userId);
     const profile = sanitizeHealthProfile(input.profile);
     const setupComplete = input.setupComplete ? 1 : 0;
     const currentTime = now();
@@ -287,10 +310,12 @@ function createAuthService(options = {}) {
         version = health_profiles.version + 1,
         updated_at = excluded.updated_at
     `).run(userId, JSON.stringify(profile), setupComplete, currentTime);
+    writeAudit("health.profile_saved", { userId, context });
     return getHealthData(userId, userId);
   }
 
-  function saveMealRecord(userId, input) {
+  function saveMealRecord(userId, input, context = {}) {
+    requireCurrentLegalConsent(userId);
     const record = sanitizeMealRecord(input.record);
     const currentTime = now();
     database.prepare(`
@@ -334,17 +359,21 @@ function createAuthService(options = {}) {
         ORDER BY recorded_at DESC, created_at DESC LIMIT 500
       )
     `).run(userId, userId);
+    writeAudit("health.meal_saved", { userId, context, metadata: { level: record.level, source: record.source } });
     return { record: getMealRecordForViewer(userId, userId, record.id) };
   }
 
-  function importHealthData(userId, input) {
-    if (input.profile) saveHealthProfile(userId, input);
+  function importHealthData(userId, input, context = {}) {
+    requireCurrentLegalConsent(userId);
+    if (input.profile) saveHealthProfile(userId, input, context);
     const records = Array.isArray(input.meals) ? input.meals.slice(-200) : [];
-    records.forEach((record) => saveMealRecord(userId, { record }));
+    records.forEach((record) => saveMealRecord(userId, { record }, context));
+    writeAudit("health.data_imported", { userId, context, metadata: { records: records.length } });
     return getHealthData(userId, userId);
   }
 
-  function markMealHandled(viewerUserId, input) {
+  function markMealHandled(viewerUserId, input, context = {}) {
+    requireCurrentLegalConsent(viewerUserId);
     const access = resolveHealthDataAccess(viewerUserId, input.elderUserId);
     const { elderUserId, permissions } = access;
     if (!permissions.canViewMeals || !permissions.canAcknowledgeAlerts) {
@@ -356,6 +385,7 @@ function createAuthService(options = {}) {
       WHERE id = ? AND elder_user_id = ?
     `).run(now(), recordId, elderUserId);
     if (!result.changes) throw new AuthError(404, "meal_not_found", "没有找到这条餐食提醒。");
+    writeAudit("health.alert_acknowledged", { userId: viewerUserId, targetId: elderUserId, context });
     return { record: getMealRecordForViewer(viewerUserId, elderUserId, recordId) };
   }
 
@@ -440,7 +470,8 @@ function createAuthService(options = {}) {
     };
   }
 
-  function createFamilyInvite(userId) {
+  function createFamilyInvite(userId, context = {}) {
+    requireCurrentLegalConsent(userId);
     const user = database.prepare("SELECT id FROM users WHERE id = ?").get(userId);
     if (!user) throw new AuthError(401, "not_authenticated", "请先登录。");
     const currentTime = now();
@@ -461,10 +492,12 @@ function createAuthService(options = {}) {
       INSERT INTO family_invites (id, elder_user_id, code_hash, expires_at, consumed_at, created_at)
       VALUES (?, ?, ?, ?, NULL, ?)
     `).run(crypto.randomUUID(), userId, hmac(`family-invite:${code}`), expiresAt, currentTime);
+    writeAudit("family.invite_created", { userId, context });
     return { code, expiresAt, expiresIn: 600 };
   }
 
-  function bindFamily(userId, input) {
+  function bindFamily(userId, input, context = {}) {
+    requireCurrentLegalConsent(userId);
     const user = database.prepare("SELECT id FROM users WHERE id = ?").get(userId);
     if (!user) throw new AuthError(401, "not_authenticated", "请先登录。");
     const code = String(input.code || "").trim();
@@ -482,11 +515,13 @@ function createAuthService(options = {}) {
         VALUES (?, ?, ?, ?)
       `).run(crypto.randomUUID(), invite.elder_user_id, userId, currentTime);
       database.prepare("UPDATE family_invites SET consumed_at = ? WHERE id = ?").run(currentTime, invite.id);
+      writeAudit("family.bound", { userId, targetId: invite.elder_user_id, context });
     });
     return getFamilyStatus(userId);
   }
 
-  function unbindFamily(userId, input) {
+  function unbindFamily(userId, input, context = {}) {
+    requireCurrentLegalConsent(userId);
     const relationId = String(input.relationId || "").trim();
     if (!relationId) throw new AuthError(400, "relation_required", "请选择要解除的家人关系。");
     const result = database.prepare(`
@@ -494,10 +529,12 @@ function createAuthService(options = {}) {
       WHERE id = ? AND (elder_user_id = ? OR family_user_id = ?)
     `).run(relationId, userId, userId);
     if (!result.changes) throw new AuthError(404, "relation_not_found", "没有找到该家人关系。");
+    writeAudit("family.unbound", { userId, context });
     return getFamilyStatus(userId);
   }
 
-  function updateFamilyPermissions(userId, input) {
+  function updateFamilyPermissions(userId, input, context = {}) {
+    requireCurrentLegalConsent(userId);
     const relationId = String(input.relationId || "").trim();
     if (!relationId) throw new AuthError(400, "relation_required", "请选择要设置的家人关系。");
     const canViewProfile = input.canViewProfile !== false;
@@ -509,10 +546,16 @@ function createAuthService(options = {}) {
       WHERE id = ? AND elder_user_id = ?
     `).run(canViewProfile ? 1 : 0, canViewMeals ? 1 : 0, canAcknowledgeAlerts ? 1 : 0, relationId, userId);
     if (!result.changes) throw new AuthError(403, "permission_change_not_allowed", "只有长辈账号可以调整共享范围。");
+    writeAudit("family.permissions_changed", {
+      userId,
+      context,
+      metadata: { canViewProfile, canViewMeals, canAcknowledgeAlerts },
+    });
     return getFamilyStatus(userId);
   }
 
-  async function verifyCurrentIdentity(userId, input) {
+  async function verifyCurrentIdentity(userId, input, context = {}) {
+    requireCurrentLegalConsent(userId);
     const user = database.prepare("SELECT id, phone FROM users WHERE id = ?").get(userId);
     if (!user) throw new AuthError(401, "not_authenticated", "请先登录。");
     const identity = await verifyIdentityInput({
@@ -535,7 +578,124 @@ function createAuthService(options = {}) {
       now(),
       userId,
     );
+    writeAudit("account.identity_verified", { userId, context, metadata: { provider: identity.provider } });
     return getPublicUser(userId);
+  }
+
+  function acceptLegal(userId, input, context = {}) {
+    validateLegalAcceptance(input);
+    const currentTime = now();
+    const result = database.prepare(`
+      UPDATE users SET privacy_version = ?, privacy_accepted_at = ?,
+        terms_version = ?, terms_accepted_at = ?, updated_at = ?
+      WHERE id = ?
+    `).run(privacyVersion, currentTime, termsVersion, currentTime, currentTime, userId);
+    if (!result.changes) throw new AuthError(401, "not_authenticated", "请先登录。");
+    writeAudit("legal.accepted", { userId, context, metadata: { privacyVersion, termsVersion } });
+    return getPublicUser(userId);
+  }
+
+  function exportAccountData(userId, context = {}) {
+    const user = database.prepare("SELECT * FROM users WHERE id = ?").get(userId);
+    if (!user) throw new AuthError(401, "not_authenticated", "请先登录。");
+    const profile = database.prepare("SELECT profile_json, setup_complete, version, updated_at FROM health_profiles WHERE elder_user_id = ?").get(userId);
+    const meals = database.prepare("SELECT * FROM meal_records WHERE elder_user_id = ? ORDER BY recorded_at ASC").all(userId).map(toPublicMealRecord);
+    const relations = getFamilyStatus(userId).linked;
+    const actorHash = hmac(`actor:${userId}`);
+    const audit = database.prepare(`
+      SELECT event_type, outcome, metadata_json, created_at FROM audit_events
+      WHERE actor_hash = ? ORDER BY created_at ASC LIMIT 5000
+    `).all(actorHash).map((event) => ({
+      eventType: event.event_type,
+      outcome: event.outcome,
+      metadata: parseStoredJson(event.metadata_json, {}),
+      createdAt: new Date(event.created_at).toISOString(),
+    }));
+    writeAudit("account.data_exported", { userId, context });
+    return {
+      exportVersion: 1,
+      exportedAt: new Date(now()).toISOString(),
+      account: {
+        id: user.id,
+        phone: user.phone,
+        nickname: user.nickname,
+        activeMode: user.active_mode || user.role,
+        identityStatus: user.identity_status,
+        identityName: user.identity_name_masked || null,
+        identityVerifiedAt: user.identity_verified_at ? new Date(user.identity_verified_at).toISOString() : null,
+        privacyVersion: user.privacy_version || null,
+        privacyAcceptedAt: user.privacy_accepted_at ? new Date(user.privacy_accepted_at).toISOString() : null,
+        termsVersion: user.terms_version || null,
+        termsAcceptedAt: user.terms_accepted_at ? new Date(user.terms_accepted_at).toISOString() : null,
+        createdAt: new Date(user.created_at).toISOString(),
+      },
+      healthProfile: profile ? {
+        profile: parseStoredJson(profile.profile_json, null),
+        setupComplete: Boolean(profile.setup_complete),
+        version: Number(profile.version || 0),
+        updatedAt: new Date(profile.updated_at).toISOString(),
+      } : null,
+      meals,
+      familyRelations: relations,
+      auditEvents: audit,
+    };
+  }
+
+  function deleteAccount(userId, input, context = {}) {
+    const user = database.prepare("SELECT * FROM users WHERE id = ?").get(userId);
+    if (!user) throw new AuthError(401, "not_authenticated", "请先登录。");
+    if (!verifyPassword(String(input.password || ""), user)) {
+      writeAudit("account.deleted", { userId, context, outcome: "denied" });
+      throw new AuthError(401, "invalid_credentials", "密码不正确，账号未删除。");
+    }
+    runTransaction(database, () => {
+      writeAudit("account.deleted", { userId, context });
+      database.prepare("DELETE FROM users WHERE id = ?").run(userId);
+    });
+    return { deleted: true };
+  }
+
+  function getOperationalStatus() {
+    const result = database.prepare("PRAGMA quick_check(1)").get();
+    const integrity = String(result?.quick_check || Object.values(result || {})[0] || "");
+    if (integrity !== "ok") throw new Error("database quick_check failed");
+    cleanupExpired(now());
+    return { database: "ok", legalVersions: { privacy: privacyVersion, terms: termsVersion } };
+  }
+
+  function validateLegalAcceptance(input) {
+    if (input.acceptLegal !== true
+      || input.privacyVersion !== privacyVersion
+      || input.termsVersion !== termsVersion) {
+      throw new AuthError(428, "legal_consent_required", "请阅读并同意当前版本的隐私政策和用户协议。");
+    }
+  }
+
+  function requireCurrentLegalConsent(userId) {
+    const user = database.prepare("SELECT privacy_version, terms_version FROM users WHERE id = ?").get(userId);
+    if (!user) throw new AuthError(401, "not_authenticated", "请先登录。");
+    if (user.privacy_version !== privacyVersion || user.terms_version !== termsVersion) {
+      throw new AuthError(428, "legal_consent_required", "需要先确认最新隐私政策和用户协议。");
+    }
+  }
+
+  function writeAudit(eventType, { userId, targetId, context = {}, outcome = "success", metadata = {} } = {}) {
+    const currentTime = now();
+    database.prepare(`
+      INSERT INTO audit_events
+      (id, actor_hash, event_type, outcome, target_hash, ip_hash, user_agent_hash, metadata_json, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      crypto.randomUUID(),
+      userId ? hmac(`actor:${userId}`) : null,
+      String(eventType).slice(0, 80),
+      outcome === "denied" ? "denied" : "success",
+      targetId ? hmac(`target:${targetId}`) : null,
+      hmac(`ip:${context.ipAddress || "unknown"}`),
+      hmac(`ua:${context.userAgent || "unknown"}`),
+      JSON.stringify(sanitizeAuditMetadata(metadata)),
+      currentTime,
+    );
   }
 
   async function verifyIdentityInput({ phone, realName, idNumber, required }) {
@@ -593,7 +753,7 @@ function createAuthService(options = {}) {
     `).get(sha256(token), currentTime);
     if (!session) return null;
     database.prepare("UPDATE sessions SET last_seen_at = ? WHERE token_hash = ?").run(currentTime, session.token_hash);
-    return { user: toPublicUser(session), tokenHash: session.token_hash };
+    return { user: toPublicUser(session, privacyVersion, termsVersion), tokenHash: session.token_hash };
   }
 
   function logout(token) {
@@ -603,12 +763,13 @@ function createAuthService(options = {}) {
   function getPublicUser(userId) {
     const user = database.prepare("SELECT * FROM users WHERE id = ?").get(userId);
     if (!user) return null;
-    return toPublicUser(user);
+    return toPublicUser(user, privacyVersion, termsVersion);
   }
 
   function cleanupExpired(currentTime = now()) {
     database.prepare("DELETE FROM sms_codes WHERE expires_at < ? OR consumed_at < ?").run(currentTime - 24 * 60 * 60 * 1000, currentTime - 24 * 60 * 60 * 1000);
     database.prepare("DELETE FROM sessions WHERE expires_at < ?").run(currentTime);
+    database.prepare("DELETE FROM audit_events WHERE created_at < ?").run(currentTime - auditRetentionDays * 24 * 60 * 60 * 1000);
   }
 
   function close() {
@@ -616,11 +777,15 @@ function createAuthService(options = {}) {
   }
 
   return {
+    acceptLegal,
+    deleteAccount,
+    exportAccountData,
     close,
     getCookiePolicy,
     getConfig,
     getFamilyStatus,
     getHealthData,
+    getOperationalStatus,
     getSession,
     login,
     logout,
@@ -668,6 +833,12 @@ async function handleAuthRequest(service, req, res, pathname, helpers) {
       sendJson(res, 200, service.getHealthData(session.user.id, url.searchParams.get("elderUserId")));
       return;
     }
+    if (pathname === "/api/auth/data-export" && req.method === "GET") {
+      const session = service.getSession(token);
+      if (!session) throw new AuthError(401, "not_authenticated", "请先登录。");
+      sendJson(res, 200, service.exportAccountData(session.user.id, context));
+      return;
+    }
     if (req.method !== "POST") throw new AuthError(405, "method_not_allowed", "请求方法不受支持。");
     requireJsonRequest(req);
     const body = await readJsonBody(req, pathname === "/api/auth/health-import" ? 512 * 1024 : 32 * 1024);
@@ -698,73 +869,87 @@ async function handleAuthRequest(service, req, res, pathname, helpers) {
       return;
     }
     if (pathname === "/api/auth/password-reset/confirm") {
-      sendJson(res, 200, service.resetPassword(body));
+      sendJson(res, 200, service.resetPassword(body, context));
+      return;
+    }
+    if (pathname === "/api/auth/legal-consent") {
+      const session = service.getSession(token);
+      if (!session) throw new AuthError(401, "not_authenticated", "请先登录。");
+      sendJson(res, 200, { user: service.acceptLegal(session.user.id, body, context) });
+      return;
+    }
+    if (pathname === "/api/auth/account-delete") {
+      const session = service.getSession(token);
+      if (!session) throw new AuthError(401, "not_authenticated", "请先登录。");
+      const result = service.deleteAccount(session.user.id, body, context);
+      clearSessionCookie(req, res, service.getCookiePolicy());
+      sendJson(res, 200, result);
       return;
     }
     if (pathname === "/api/auth/role") {
       const session = service.getSession(token);
       if (!session) throw new AuthError(401, "not_authenticated", "请先登录。");
-      sendJson(res, 200, { user: service.updateRole(session.user.id, body) });
+      sendJson(res, 200, { user: service.updateRole(session.user.id, body, context) });
       return;
     }
     if (pathname === "/api/auth/profile") {
       const session = service.getSession(token);
       if (!session) throw new AuthError(401, "not_authenticated", "请先登录。");
-      sendJson(res, 200, { user: service.updateProfile(session.user.id, body) });
+      sendJson(res, 200, { user: service.updateProfile(session.user.id, body, context) });
       return;
     }
     if (pathname === "/api/auth/health-profile") {
       const session = service.getSession(token);
       if (!session) throw new AuthError(401, "not_authenticated", "请先登录。");
-      sendJson(res, 200, service.saveHealthProfile(session.user.id, body));
+      sendJson(res, 200, service.saveHealthProfile(session.user.id, body, context));
       return;
     }
     if (pathname === "/api/auth/health-import") {
       const session = service.getSession(token);
       if (!session) throw new AuthError(401, "not_authenticated", "请先登录。");
-      sendJson(res, 200, service.importHealthData(session.user.id, body));
+      sendJson(res, 200, service.importHealthData(session.user.id, body, context));
       return;
     }
     if (pathname === "/api/auth/meal-record") {
       const session = service.getSession(token);
       if (!session) throw new AuthError(401, "not_authenticated", "请先登录。");
-      sendJson(res, 201, service.saveMealRecord(session.user.id, body));
+      sendJson(res, 201, service.saveMealRecord(session.user.id, body, context));
       return;
     }
     if (pathname === "/api/auth/meal-handled") {
       const session = service.getSession(token);
       if (!session) throw new AuthError(401, "not_authenticated", "请先登录。");
-      sendJson(res, 200, service.markMealHandled(session.user.id, body));
+      sendJson(res, 200, service.markMealHandled(session.user.id, body, context));
       return;
     }
     if (pathname === "/api/auth/family/invite") {
       const session = service.getSession(token);
       if (!session) throw new AuthError(401, "not_authenticated", "请先登录。");
-      sendJson(res, 201, service.createFamilyInvite(session.user.id));
+      sendJson(res, 201, service.createFamilyInvite(session.user.id, context));
       return;
     }
     if (pathname === "/api/auth/family/bind") {
       const session = service.getSession(token);
       if (!session) throw new AuthError(401, "not_authenticated", "请先登录。");
-      sendJson(res, 200, service.bindFamily(session.user.id, body));
+      sendJson(res, 200, service.bindFamily(session.user.id, body, context));
       return;
     }
     if (pathname === "/api/auth/family/unbind") {
       const session = service.getSession(token);
       if (!session) throw new AuthError(401, "not_authenticated", "请先登录。");
-      sendJson(res, 200, service.unbindFamily(session.user.id, body));
+      sendJson(res, 200, service.unbindFamily(session.user.id, body, context));
       return;
     }
     if (pathname === "/api/auth/family/permissions") {
       const session = service.getSession(token);
       if (!session) throw new AuthError(401, "not_authenticated", "请先登录。");
-      sendJson(res, 200, service.updateFamilyPermissions(session.user.id, body));
+      sendJson(res, 200, service.updateFamilyPermissions(session.user.id, body, context));
       return;
     }
     if (pathname === "/api/auth/identity/verify") {
       const session = service.getSession(token);
       if (!session) throw new AuthError(401, "not_authenticated", "请先登录。");
-      sendJson(res, 200, { user: await service.verifyCurrentIdentity(session.user.id, body) });
+      sendJson(res, 200, { user: await service.verifyCurrentIdentity(session.user.id, body, context) });
       return;
     }
     throw new AuthError(404, "not_found", "接口不存在。");
@@ -774,6 +959,7 @@ async function handleAuthRequest(service, req, res, pathname, helpers) {
       return;
     }
     process.stderr.write(`[auth_api] ${String(error?.message || error).slice(0, 180)}\n`);
+    helpers.onError?.("auth_internal_error", error);
     sendJson(res, 500, { error: "auth_internal_error", message: "账号服务暂时不可用，请稍后再试。" });
   }
 }
@@ -881,6 +1067,19 @@ function migrate(database) {
       updated_at INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_meal_records_elder_time ON meal_records(elder_user_id, recorded_at DESC);
+    CREATE TABLE IF NOT EXISTS audit_events (
+      id TEXT PRIMARY KEY,
+      actor_hash TEXT,
+      event_type TEXT NOT NULL,
+      outcome TEXT NOT NULL CHECK (outcome IN ('success', 'denied')),
+      target_hash TEXT,
+      ip_hash TEXT NOT NULL,
+      user_agent_hash TEXT NOT NULL,
+      metadata_json TEXT NOT NULL DEFAULT '{}',
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_audit_actor_time ON audit_events(actor_hash, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_events(created_at);
   `);
   const userColumns = database.prepare("PRAGMA table_info(users)").all();
   if (!userColumns.some((column) => column.name === "onboarding_completed")) {
@@ -889,6 +1088,18 @@ function migrate(database) {
   if (!userColumns.some((column) => column.name === "active_mode")) {
     database.exec("ALTER TABLE users ADD COLUMN active_mode TEXT NOT NULL DEFAULT 'elder'");
     database.exec("UPDATE users SET active_mode = role WHERE role IN ('elder', 'family')");
+  }
+  if (!userColumns.some((column) => column.name === "privacy_version")) {
+    database.exec("ALTER TABLE users ADD COLUMN privacy_version TEXT");
+  }
+  if (!userColumns.some((column) => column.name === "privacy_accepted_at")) {
+    database.exec("ALTER TABLE users ADD COLUMN privacy_accepted_at INTEGER");
+  }
+  if (!userColumns.some((column) => column.name === "terms_version")) {
+    database.exec("ALTER TABLE users ADD COLUMN terms_version TEXT");
+  }
+  if (!userColumns.some((column) => column.name === "terms_accepted_at")) {
+    database.exec("ALTER TABLE users ADD COLUMN terms_accepted_at INTEGER");
   }
   const relationColumns = database.prepare("PRAGMA table_info(family_relations)").all();
   if (!relationColumns.some((column) => column.name === "can_view_profile")) {
@@ -1127,7 +1338,7 @@ function maskRealName(name) {
   return name.length <= 2 ? `${name[0]}*` : `${name[0]}${"*".repeat(Math.min(4, name.length - 2))}${name.at(-1)}`;
 }
 
-function toPublicUser(user) {
+function toPublicUser(user, privacyVersion = DEFAULT_PRIVACY_VERSION, termsVersion = DEFAULT_TERMS_VERSION) {
   return {
     id: user.id,
     phone: maskPhone(user.phone),
@@ -1138,6 +1349,9 @@ function toPublicUser(user) {
     identityStatus: user.identity_status,
     identityName: user.identity_name_masked || null,
     identityVerifiedAt: user.identity_verified_at || null,
+    legalAcceptedCurrent: user.privacy_version === privacyVersion && user.terms_version === termsVersion,
+    privacyVersion: user.privacy_version || null,
+    termsVersion: user.terms_version || null,
   };
 }
 
@@ -1212,8 +1426,25 @@ function parseBoolean(value, fallback) {
   return ["1", "true", "yes", "on"].includes(String(value).toLowerCase());
 }
 
+function clampInteger(value, minimum, maximum, fallback) {
+  const number = Number(value);
+  if (!Number.isInteger(number)) return fallback;
+  return Math.min(maximum, Math.max(minimum, number));
+}
+
+function sanitizeAuditMetadata(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value).slice(0, 12).map(([key, item]) => {
+    const cleanKey = String(key).replace(/[^A-Za-z0-9_.-]/g, "").slice(0, 40);
+    if (typeof item === "boolean" || typeof item === "number") return [cleanKey, item];
+    return [cleanKey, String(item ?? "").slice(0, 80)];
+  }).filter(([key]) => key));
+}
+
 module.exports = {
   AuthError,
+  DEFAULT_PRIVACY_VERSION,
+  DEFAULT_TERMS_VERSION,
   SESSION_COOKIE,
   createAuthService,
   handleAuthRequest,

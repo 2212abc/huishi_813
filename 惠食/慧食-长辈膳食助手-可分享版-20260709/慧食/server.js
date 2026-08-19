@@ -1,4 +1,5 @@
 const http = require("http");
+const crypto = require("crypto");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -28,6 +29,8 @@ const WHISPER_COMMAND = process.env.WHISPER_COMMAND || "";
 const WHISPER_MODEL = process.env.WHISPER_MODEL || "";
 const WHISPER_LIBRARY_PATH = process.env.WHISPER_LIBRARY_PATH || "";
 const FFMPEG_COMMAND = process.env.FFMPEG_COMMAND || "/usr/bin/ffmpeg";
+const ALERT_WEBHOOK_URL = process.env.ALERT_WEBHOOK_URL || "";
+const ALERT_WEBHOOK_TOKEN = process.env.ALERT_WEBHOOK_TOKEN || "";
 const execFileAsync = promisify(execFile);
 const AUTH_API_PATHS = new Set([
   "/api/auth/status",
@@ -51,8 +54,13 @@ const AUTH_API_PATHS = new Set([
   "/api/auth/family/unbind",
   "/api/auth/family/permissions",
   "/api/auth/identity/verify",
+  "/api/auth/legal-consent",
+  "/api/auth/data-export",
+  "/api/auth/account-delete",
 ]);
 const API_PATHS = new Set([
+  "/healthz",
+  "/readyz",
   "/api/status",
   "/api/transcribe-speech",
   "/api/analyze-photo",
@@ -66,6 +74,8 @@ const PUBLIC_FILES = new Map([
   ["/app.js", "app.js"],
   ["/styles.css", "styles.css"],
   ["/assets/logo.png", path.join("assets", "logo.png")],
+  ["/privacy.html", "privacy.html"],
+  ["/terms.html", "terms.html"],
 ]);
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX = Number(process.env.API_RATE_LIMIT || 30);
@@ -74,6 +84,7 @@ const UPSTREAM_TIMEOUT_MS = Number(process.env.UPSTREAM_TIMEOUT_MS || 18_000);
 const rateLimits = new Map();
 let activeTranscriptions = 0;
 let authService = null;
+let lastAlertAt = 0;
 
 const TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -87,7 +98,9 @@ const TYPES = {
 };
 
 const server = http.createServer(async (req, res) => {
-  setSecurityHeaders(res);
+  const requestStartedAt = Date.now();
+  const requestId = crypto.randomUUID();
+  setSecurityHeaders(req, res, requestId);
   let pathname;
   try {
     const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
@@ -96,6 +109,17 @@ const server = http.createServer(async (req, res) => {
     sendJson(res, 400, { error: "invalid_request", message: "请求地址无效。" });
     return;
   }
+
+  res.once("finish", () => {
+    if (pathname === "/healthz" && res.statusCode < 400) return;
+    writeOperationalLog(res.statusCode >= 500 ? "error" : "info", "http.request", {
+      requestId,
+      method: req.method,
+      pathname,
+      status: res.statusCode,
+      durationMs: Date.now() - requestStartedAt,
+    });
+  });
 
   if (API_PATHS.has(pathname)) {
     if (!isSameOriginRequest(req)) {
@@ -114,13 +138,21 @@ const server = http.createServer(async (req, res) => {
     }
     if (AUTH_API_PATHS.has(pathname)) {
       try {
-        await handleAuthRequest(getAuthService(), req, res, pathname, { getClientIp, sendJson, readJsonBody });
+        await handleAuthRequest(getAuthService(), req, res, pathname, {
+          getClientIp,
+          sendJson,
+          readJsonBody,
+          onError(event, error) { void emitErrorAlert(event, error); },
+        });
       } catch (error) {
         process.stderr.write(`[auth_startup] ${String(error?.message || error).slice(0, 180)}\n`);
+        void emitErrorAlert("auth_startup", error);
         sendJson(res, 503, { error: "auth_not_configured", message: "账号服务正在配置，请稍后再试。" });
       }
       return;
     }
+    if (pathname === "/healthz") handleLiveness(req, res);
+    if (pathname === "/readyz") handleReadiness(req, res);
     if (pathname === "/api/status") handleStatus(req, res);
     if (pathname === "/api/transcribe-speech") await handleTranscribeSpeech(req, res);
     if (pathname === "/api/analyze-photo") await handleAnalyzePhoto(req, res);
@@ -155,6 +187,16 @@ const server = http.createServer(async (req, res) => {
 if (require.main === module) {
   try {
     startServer();
+    for (const signal of ["SIGTERM", "SIGINT"]) {
+      process.once(signal, () => {
+        writeOperationalLog("info", "service.shutdown", { signal });
+        server.close(() => {
+          closeAuthService();
+          process.exit(0);
+        });
+        setTimeout(() => process.exit(1), 15_000).unref();
+      });
+    }
   } catch (error) {
     process.stderr.write(`[startup_blocked] ${String(error?.message || error)}\n`);
     process.exitCode = 1;
@@ -208,6 +250,11 @@ function assertSafeRuntimeConfiguration(environment = process.env) {
     if (parseEnvBoolean(environment.REQUIRE_SERVER_SPEECH, false) && !hasConfiguredSpeechProvider(environment)) {
       errors.push("REQUIRE_SERVER_SPEECH=true needs valid WHISPER_COMMAND, WHISPER_MODEL, and FFMPEG_COMMAND files");
     }
+    if (!isHttpsUrl(environment.PUBLIC_BASE_URL)) errors.push("PUBLIC_BASE_URL must be the production HTTPS origin");
+    if (!parseEnvBoolean(environment.LEGAL_DOCUMENTS_APPROVED, false)) errors.push("LEGAL_DOCUMENTS_APPROVED must be true after legal review");
+    if (String(environment.LEGAL_OPERATOR_NAME || "").trim().length < 2) errors.push("LEGAL_OPERATOR_NAME is required in production");
+    if (String(environment.LEGAL_CONTACT || "").trim().length < 5) errors.push("LEGAL_CONTACT is required in production");
+    if (environment.ALERT_WEBHOOK_URL && !isHttpsUrl(environment.ALERT_WEBHOOK_URL)) errors.push("ALERT_WEBHOOK_URL must use HTTPS");
   }
 
   if (errors.length) {
@@ -271,7 +318,7 @@ function sendJson(res, status, data) {
   res.end(JSON.stringify(data));
 }
 
-function setSecurityHeaders(res) {
+function setSecurityHeaders(req, res, requestId) {
   res.setHeader("Cache-Control", "no-store");
   res.setHeader("Content-Security-Policy", "default-src 'self'; img-src 'self' data: blob:; connect-src 'self'; script-src 'self'; style-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'");
   res.setHeader("X-Content-Type-Options", "nosniff");
@@ -279,6 +326,12 @@ function setSecurityHeaders(res) {
   res.setHeader("Referrer-Policy", "no-referrer");
   res.setHeader("Permissions-Policy", "camera=(), geolocation=(), microphone=(self)");
   res.setHeader("Cross-Origin-Resource-Policy", "same-origin");
+  res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
+  res.setHeader("X-Permitted-Cross-Domain-Policies", "none");
+  res.setHeader("X-Request-Id", requestId);
+  if (String(process.env.NODE_ENV || "").toLowerCase() === "production" && isSecureRequest(req)) {
+    res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+  }
 }
 
 function isSameOriginRequest(req) {
@@ -326,7 +379,81 @@ function sendApiError(res, error, fallbackCode) {
     return;
   }
   process.stderr.write(`[${fallbackCode}] ${String(error?.message || error).slice(0, 200)}\n`);
+  void emitErrorAlert(fallbackCode, error);
   sendJson(res, 502, { error: fallbackCode, message: "分析服务暂时不可用，请稍后重试。" });
+}
+
+function handleLiveness(req, res) {
+  if (req.method !== "GET" && req.method !== "HEAD") {
+    sendJson(res, 405, { error: "method_not_allowed", message: "请求方法不受支持。" });
+    return;
+  }
+  const payload = { ok: true, service: "huishi", status: "alive" };
+  if (req.method === "HEAD") {
+    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+    res.end();
+    return;
+  }
+  sendJson(res, 200, payload);
+}
+
+function handleReadiness(req, res) {
+  if (req.method !== "GET" && req.method !== "HEAD") {
+    sendJson(res, 405, { error: "method_not_allowed", message: "请求方法不受支持。" });
+    return;
+  }
+  try {
+    const operational = getAuthService().getOperationalStatus();
+    if (req.method === "HEAD") {
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end();
+      return;
+    }
+    sendJson(res, 200, { ok: true, service: "huishi", status: "ready", checks: { database: operational.database } });
+  } catch (error) {
+    writeOperationalLog("error", "service.not_ready", { reason: String(error?.message || error).slice(0, 120) });
+    void emitErrorAlert("service_not_ready", error);
+    sendJson(res, 503, { ok: false, service: "huishi", status: "not_ready" });
+  }
+}
+
+function isSecureRequest(req) {
+  return req.socket?.encrypted === true || String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim() === "https";
+}
+
+function writeOperationalLog(level, event, fields = {}) {
+  const payload = JSON.stringify({
+    timestamp: new Date().toISOString(),
+    level,
+    event,
+    ...fields,
+  });
+  (level === "error" ? process.stderr : process.stdout).write(`${payload}\n`);
+}
+
+async function emitErrorAlert(event, error) {
+  if (!ALERT_WEBHOOK_URL || !isHttpsUrl(ALERT_WEBHOOK_URL)) return;
+  const now = Date.now();
+  if (now - lastAlertAt < 5 * 60 * 1000) return;
+  lastAlertAt = now;
+  try {
+    await fetch(ALERT_WEBHOOK_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(ALERT_WEBHOOK_TOKEN ? { Authorization: `Bearer ${ALERT_WEBHOOK_TOKEN}` } : {}),
+      },
+      body: JSON.stringify({
+        service: "huishi",
+        event: String(event).slice(0, 80),
+        message: String(error?.message || error).slice(0, 180),
+        timestamp: new Date().toISOString(),
+      }),
+      signal: AbortSignal.timeout(5000),
+    });
+  } catch (alertError) {
+    writeOperationalLog("error", "alert.delivery_failed", { reason: String(alertError?.message || alertError).slice(0, 120) });
+  }
 }
 
 function loadEnvFile() {

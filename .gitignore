@@ -9,3 +9,6 @@ data/
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+backups/
+*.aesgcm
+*.key

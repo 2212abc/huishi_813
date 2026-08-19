@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Huishi encrypted backup every six hours
+
+[Timer]
+OnCalendar=*-*-* 00,06,12,18:15:00
+Persistent=true
+RandomizedDelaySec=300
+Unit=huishi-backup.service
+
+[Install]
+WantedBy=timers.target

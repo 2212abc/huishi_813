@@ -1,0 +1,19 @@
+[Unit]
+Description=Check public Huishi readiness and send alert on failure
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=huishi
+Group=huishi
+WorkingDirectory=/opt/huishi
+EnvironmentFile=/etc/huishi/huishi.env
+ExecStart=/usr/bin/node /opt/huishi/ops/healthcheck.js
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=huishi-monitor

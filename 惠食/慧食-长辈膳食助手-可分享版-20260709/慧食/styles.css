@@ -570,6 +570,20 @@ main:focus {
   opacity: 1;
 }
 
+.legal-links {
+  margin: -4px 0 0 32px;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.55;
+}
+
+.legal-links a {
+  color: var(--orange);
+  font-weight: 750;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
 .clear-local-data {
   justify-self: center;
   color: var(--red);
@@ -1180,6 +1194,8 @@ main:focus {
   gap: 12px;
   font-size: 1rem;
   font-weight: 700;
+  text-decoration: none;
+  border-top: 1px solid var(--line);
 }
 
 .settings-link strong {
@@ -2441,6 +2457,68 @@ textarea {
   margin-top: 8px;
 }
 
+.legal-sheet,
+.account-data-sheet {
+  text-align: left;
+}
+
+.legal-document-links {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-bottom: 18px;
+}
+
+.legal-document-links a {
+  display: grid;
+  place-items: center;
+  text-decoration: none;
+}
+
+.legal-sheet > .primary-button,
+.account-data-sheet > .primary-button,
+.account-data-sheet > .secondary-button {
+  width: 100%;
+  margin-top: 10px;
+}
+
+.danger-outline {
+  color: var(--red);
+  border-color: rgba(188, 57, 52, 0.4);
+  background: #fff;
+}
+
+.account-delete-panel {
+  margin-top: 14px;
+  padding: 16px;
+  border: 2px solid rgba(188, 57, 52, 0.3);
+  border-radius: 8px;
+  background: rgba(188, 57, 52, 0.06);
+}
+
+.account-delete-panel > strong {
+  display: block;
+  color: var(--red);
+  font-size: 1.08rem;
+}
+
+.account-delete-panel > p {
+  margin: 6px 0 14px;
+  color: var(--text);
+  line-height: 1.55;
+}
+
+.danger-button {
+  width: 100%;
+  min-height: 54px;
+  margin-top: 12px;
+  padding: 10px 16px;
+  color: #fff;
+  border-radius: 8px;
+  background: var(--red);
+  font-weight: 800;
+}
+
 .bind-sheet h2 {
   margin: 4px 54px 10px 0;
   color: var(--text);
@@ -3228,7 +3306,8 @@ html[data-font-size="xlarge"] .hero-plate {
 html[data-font-size="xlarge"] .quick-grid,
 html[data-font-size="xlarge"] .photo-actions,
 html[data-font-size="xlarge"] .wizard-actions,
-html[data-font-size="xlarge"] .role-grid {
+html[data-font-size="xlarge"] .role-grid,
+html[data-font-size="xlarge"] .legal-document-links {
   grid-template-columns: 1fr;
 }
 
@@ -3261,7 +3340,8 @@ html[data-font-size="xlarge"] select,
 html[data-font-size="xlarge"] textarea,
 html[data-font-size="xlarge"] .primary-button,
 html[data-font-size="xlarge"] .secondary-button,
-html[data-font-size="xlarge"] .file-button {
+html[data-font-size="xlarge"] .file-button,
+html[data-font-size="xlarge"] .danger-button {
   min-height: 68px;
 }
 

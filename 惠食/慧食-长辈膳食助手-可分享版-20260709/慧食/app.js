@@ -1,5 +1,7 @@
 const STORAGE_KEY = "huishi_local_pilot_v2";
 const TODAY = new Date();
+const PRIVACY_POLICY_VERSION = "2026-08-19";
+const TERMS_VERSION = "2026-08-19";
 const COMMON_CONDITION_IDS = ["hypertension", "diabetes", "fat", "gout", "kidney", "chewing"];
 const PORTION_OPTIONS = [
   { id: "small", label: "小份", factor: 0.7 },
@@ -177,6 +179,7 @@ const DEFAULT_STATE = {
     phone: "",
     identityStatus: "unverified",
     onboardingComplete: false,
+    legalAcceptedCurrent: false,
   },
   ui: {
     fontSize: "large",
@@ -262,6 +265,9 @@ let pendingRole = "elder";
 let lastSyncedNickname = "";
 let familyBinding = { loaded: false, linked: [], hasActiveInvite: false, inviteExpiresAt: null };
 let familyBindingBusy = false;
+let legalBusy = false;
+let pendingRolePromptAfterLegal = false;
+let accountDataBusy = false;
 let activeFamilyInvite = null;
 let sharedHealthData = { loaded: false, elder: null, profile: null, setupComplete: false, meals: [], permissions: null, error: "" };
 let healthProfileSyncTimer = null;
@@ -443,6 +449,18 @@ function bindEvents() {
   if (privacyConsentButton) privacyConsentButton.addEventListener("click", () => {
     setPrivacyConsent(privacyConsentButton.getAttribute("aria-checked") !== "true");
   });
+  $("#confirmLegalConsent")?.addEventListener("click", confirmLegalConsent);
+  $("#legalLogout")?.addEventListener("click", async () => {
+    closeLegalModal(false);
+    await handleLogout();
+  });
+  $("#closeAccountDataModal")?.addEventListener("click", closeAccountDataModal);
+  $("#accountDataModal")?.addEventListener("click", (event) => {
+    if (event.target === $("#accountDataModal")) closeAccountDataModal();
+  });
+  $("#exportAccountData")?.addEventListener("click", exportAccountData);
+  $("#revealAccountDelete")?.addEventListener("click", revealAccountDelete);
+  $("#confirmAccountDelete")?.addEventListener("click", deleteAccountPermanently);
 
   $("#modeSwitch").addEventListener("click", () => openRoleModal(state.auth.role));
 
@@ -518,6 +536,10 @@ function bindEvents() {
   });
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape") return;
+    if (!$("#accountDataModal")?.hidden) {
+      closeAccountDataModal();
+      return;
+    }
     if (!$("#roleModal").hidden) {
       closeRoleModal();
       return;
@@ -630,6 +652,9 @@ async function handleAuthSubmit(event) {
         phone,
         code,
         password,
+        acceptLegal: true,
+        privacyVersion: PRIVACY_POLICY_VERSION,
+        termsVersion: TERMS_VERSION,
       };
       const result = await authApi("/api/auth/register", payload);
       completeAuthentication(result.user, true, true);
@@ -925,10 +950,11 @@ function completeAuthentication(user, acceptedPrivacy, promptForRole = false) {
     phone: user?.phone || "",
     identityStatus: user?.identityStatus || "unverified",
     onboardingComplete: Boolean(user?.onboardingComplete),
+    legalAcceptedCurrent: Boolean(user?.legalAcceptedCurrent),
   };
   state.profile.nickname = user?.nickname || "";
   lastSyncedNickname = user?.nickname || "";
-  if (acceptedPrivacy) state.privacy = { accepted: true, acceptedAt: new Date().toISOString() };
+  if (acceptedPrivacy || user?.legalAcceptedCurrent) state.privacy = { accepted: true, acceptedAt: new Date().toISOString() };
   state.mode = role;
   state.wizardOpen = false;
   state.screen = role === "family" ? "family" : "home";
@@ -943,8 +969,13 @@ function completeAuthentication(user, acceptedPrivacy, promptForRole = false) {
   sharedHealthData = { loaded: false, elder: null, profile: null, setupComplete: false, meals: [], permissions: null, error: "" };
   activeFamilyInvite = null;
   void refreshFamilyBindingStatus();
-  if (role === "elder") void hydrateOwnHealthData();
-  if (promptForRole) openRoleModal(role);
+  if (state.auth.legalAcceptedCurrent && role === "elder") void hydrateOwnHealthData();
+  if (!state.auth.legalAcceptedCurrent) {
+    pendingRolePromptAfterLegal = promptForRole;
+    openLegalModal();
+  } else if (promptForRole) {
+    openRoleModal(role);
+  }
 }
 
 function resetLocalHealthData() {
@@ -1056,6 +1087,131 @@ function clearLocalData() {
   localStorage.removeItem(STORAGE_KEY);
   state = structuredClone(DEFAULT_STATE);
   window.location.reload();
+}
+
+function openLegalModal() {
+  if (!state.auth.loggedIn) return;
+  $(".app-shell").inert = true;
+  $("#legalModal").hidden = false;
+  $("#legalError").hidden = true;
+  $("#legalError").textContent = "";
+  requestAnimationFrame(() => $("#confirmLegalConsent")?.focus());
+}
+
+function closeLegalModal(restoreApp = true) {
+  $("#legalModal").hidden = true;
+  if (restoreApp) $(".app-shell").inert = false;
+}
+
+async function confirmLegalConsent() {
+  if (legalBusy) return;
+  legalBusy = true;
+  $("#confirmLegalConsent").disabled = true;
+  $("#confirmLegalConsent").textContent = "正在保存…";
+  try {
+    const result = await authApi("/api/auth/legal-consent", {
+      acceptLegal: true,
+      privacyVersion: PRIVACY_POLICY_VERSION,
+      termsVersion: TERMS_VERSION,
+    });
+    state.auth.legalAcceptedCurrent = true;
+    state.privacy = { accepted: true, acceptedAt: new Date().toISOString() };
+    saveState();
+    closeLegalModal();
+    if (state.auth.role === "elder") void hydrateOwnHealthData();
+    if (pendingRolePromptAfterLegal) openRoleModal(result.user?.role || state.auth.role);
+    pendingRolePromptAfterLegal = false;
+    showToast("已保存协议确认");
+  } catch (error) {
+    $("#legalError").textContent = error.message || "保存失败，请重试。";
+    $("#legalError").hidden = false;
+  } finally {
+    legalBusy = false;
+    $("#confirmLegalConsent").disabled = false;
+    $("#confirmLegalConsent").textContent = "同意并继续";
+  }
+}
+
+function openAccountDataModal() {
+  if (!state.auth.loggedIn) return;
+  accountDataBusy = false;
+  $("#accountDeletePanel").hidden = true;
+  $("#accountDeletePassword").value = "";
+  setAccountDataError("");
+  $(".app-shell").inert = true;
+  $("#accountDataModal").hidden = false;
+  requestAnimationFrame(() => $("#exportAccountData")?.focus());
+}
+
+function closeAccountDataModal() {
+  if (accountDataBusy) return;
+  $("#accountDataModal").hidden = true;
+  $(".app-shell").inert = false;
+}
+
+function revealAccountDelete() {
+  $("#accountDeletePanel").hidden = false;
+  $("#accountDeletePassword").focus();
+}
+
+async function exportAccountData() {
+  if (accountDataBusy) return;
+  accountDataBusy = true;
+  setAccountDataError("");
+  $("#exportAccountData").disabled = true;
+  $("#exportAccountData").textContent = "正在导出…";
+  try {
+    const data = await authApi("/api/auth/data-export");
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `huishi-data-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    showToast("个人数据已导出");
+  } catch (error) {
+    setAccountDataError(error.message || "导出失败，请重试。");
+  } finally {
+    accountDataBusy = false;
+    $("#exportAccountData").disabled = false;
+    $("#exportAccountData").textContent = "导出我的全部数据";
+  }
+}
+
+async function deleteAccountPermanently() {
+  if (accountDataBusy) return;
+  const password = $("#accountDeletePassword").value;
+  if (!password) {
+    setAccountDataError("请输入当前密码。");
+    $("#accountDeletePassword").focus();
+    return;
+  }
+  if (!window.confirm("确定永久删除账号、健康档案、餐食记录和家人绑定吗？此操作不能撤销。")) return;
+  accountDataBusy = true;
+  setAccountDataError("");
+  $("#confirmAccountDelete").disabled = true;
+  $("#confirmAccountDelete").textContent = "正在删除…";
+  try {
+    await authApi("/api/auth/account-delete", { password });
+    localStorage.removeItem(STORAGE_KEY);
+    window.location.reload();
+  } catch (error) {
+    setAccountDataError(error.message || "删除失败，账号未变更。");
+  } finally {
+    accountDataBusy = false;
+    $("#confirmAccountDelete").disabled = false;
+    $("#confirmAccountDelete").textContent = "永久删除账号";
+  }
+}
+
+function setAccountDataError(message) {
+  const error = $("#accountDataError");
+  if (!error) return;
+  error.textContent = message;
+  error.hidden = !message;
 }
 
 function renderAll() {
@@ -1382,6 +1538,14 @@ function renderProfileInsights() {
         <span>了解家庭绑定状态</span>
         <strong>›</strong>
       </button>
+      <a class="settings-link" href="/privacy.html" target="_blank" rel="noopener">
+        <span>隐私政策与用户协议</span>
+        <strong>›</strong>
+      </a>
+      <button class="settings-link" type="button" data-account-data>
+        <span>导出数据或删除账号</span>
+        <strong>›</strong>
+      </button>
     </section>
     <p class="profile-footnote">慧食建议仅供参考，不能替代医生诊断。慢性肾病等复杂情况请遵医嘱。</p>
   `;
@@ -1414,6 +1578,13 @@ function bindProfileSettingEvents() {
       event.preventDefault();
       event.stopPropagation();
       openBindModal();
+    });
+  });
+  $$("[data-account-data]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      openAccountDataModal();
     });
   });
 }
