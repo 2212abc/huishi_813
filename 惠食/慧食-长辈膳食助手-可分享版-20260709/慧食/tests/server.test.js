@@ -10,6 +10,7 @@ process.env.AUTH_SECRET = "test-api-secret-with-more-than-thirty-two-characters"
 const {
   closeAuthService,
   assertSafeRuntimeConfiguration,
+  getServiceCapabilities,
   getLocalModelJsonContent,
   normalizeMealAnalysisJson,
   normalizeStatus,
@@ -64,9 +65,23 @@ test("status endpoint reports optional analysis capabilities without exposing co
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), {
     ok: true,
+    statusVersion: 2,
     photoAnalysis: false,
-    textAnalysis: false,
+    textAnalysis: true,
+    textModelAvailable: false,
+    textAnalysisMode: "client-rules",
     speechRecognition: "browser",
+    capabilities: {
+      text: { available: true, mode: "client-rules" },
+      photo: { available: false, mode: "disabled", reason: "provider_not_configured" },
+      speechInput: { available: true, mode: "browser", secureContextRequired: true },
+      speechOutput: { available: true, mode: "browser" },
+    },
+  });
+  assert.deepEqual(getServiceCapabilities().capabilities.photo, {
+    available: false,
+    mode: "disabled",
+    reason: "provider_not_configured",
   });
 });
 
@@ -134,6 +149,7 @@ test("unsafe public and production runtime configurations fail before startup", 
     TRUST_PROXY: "true",
     SMS_PROVIDER: "webhook",
     SMS_WEBHOOK_URL: "https://sms.example.test/send",
+    ALLOW_PHOTO_DISABLED: "true",
   }));
 });
 
@@ -219,5 +235,7 @@ test("voice remains the primary action while mobile recovery controls are shippe
   assert.match(appSource, /文字输入仅作备用/);
   assert.match(appSource, /data-photo-retry/);
   assert.match(appSource, /data-photo-to-text/);
+  assert.match(appSource, /serviceStatus\.textModelAvailable/);
+  assert.match(appSource, /所选照片不会上传/);
   assert.match(stylesSource, /html\.keyboard-open \.bottom-nav/);
 });

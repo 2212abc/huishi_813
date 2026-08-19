@@ -229,7 +229,14 @@ let lastFocusedElement = null;
 let roleLastFocusedElement = null;
 let lastPhotoFile = null;
 let largestViewportHeight = window.visualViewport?.height || window.innerHeight;
-let serviceStatus = { photoAnalysis: false, textAnalysis: false, speechRecognition: "browser", checked: false };
+let serviceStatus = {
+  photoAnalysis: false,
+  textAnalysis: true,
+  textModelAvailable: false,
+  textAnalysisMode: "client-rules",
+  speechRecognition: "browser",
+  checked: false,
+};
 let authConfig = { smsReady: false, smsMode: "disabled", registrationSmsRequired: true, passwordResetSmsRequired: true, identityReady: false, identityRequired: false, checked: false };
 let authBusy = false;
 let authCodeCooldown = 0;
@@ -1034,7 +1041,7 @@ function renderPhotoAccessHint() {
     : serviceStatus.photoAnalysis
       ? "照片会由当前服务器分析，完成后请核对识别出的食物。"
       : serviceStatus.checked
-        ? "照片识别服务正在准备中，您仍可先选择照片或改用文字。"
+        ? "当前服务器未配置照片识别，所选照片不会上传。请先改用文字记录。"
         : "正在检查照片识别服务。";
 }
 
@@ -1776,7 +1783,7 @@ async function analyzeVoiceMeal() {
     renderUnclearResult("#voiceResult", "voice", true, localParsed);
     return;
   }
-  if (localParsed.status !== "food" && serviceStatus.textAnalysis) {
+  if (localParsed.status !== "food" && serviceStatus.textModelAvailable) {
     const button = $("#voiceAnalyze");
     button.disabled = true;
     button.setAttribute("aria-busy", "true");
@@ -2589,6 +2596,13 @@ async function processPhoto(file, input = null) {
   const url = URL.createObjectURL(file);
   preview.classList.add("has-image");
   preview.innerHTML = `<img src="${url}" alt="从相册选择的饭菜照片" />`;
+  if (serviceStatus.checked && !serviceStatus.photoAnalysis) {
+    renderPhotoUnclear("当前服务器尚未配置照片识别，系统不会上传或猜测照片内容。请改用“问一问”输入食物名称。", "photo_model_not_configured");
+    if (reset) reset.hidden = false;
+    if (input) input.value = "";
+    showToast("照片未上传，请先改用文字记录");
+    return;
+  }
   resultPanel.innerHTML = renderResultCard("yellow", "正在看照片", "我会先判断是不是饭菜照片，再给出简短提醒。");
   resultPanel.setAttribute("aria-busy", "true");
   if (picker) {
@@ -3533,12 +3547,14 @@ async function refreshServiceStatus() {
     const data = await response.json();
     serviceStatus = {
       photoAnalysis: Boolean(data.photoAnalysis),
-      textAnalysis: Boolean(data.textAnalysis),
+      textAnalysis: data.textAnalysis !== false,
+      textModelAvailable: Boolean(data.textModelAvailable),
+      textAnalysisMode: String(data.textAnalysisMode || "client-rules"),
       speechRecognition: data.speechRecognition === "server" ? "server" : "browser",
       checked: true,
     };
   } catch {
-    serviceStatus = { photoAnalysis: false, textAnalysis: false, speechRecognition: "browser", checked: true };
+    serviceStatus = { photoAnalysis: false, textAnalysis: true, textModelAvailable: false, textAnalysisMode: "client-rules", speechRecognition: "browser", checked: true };
   }
   renderPhotoAccessHint();
   renderMealMode();

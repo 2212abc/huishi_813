@@ -201,6 +201,12 @@ function assertSafeRuntimeConfiguration(environment = process.env) {
       && (String(environment.IDENTITY_PROVIDER || "").toLowerCase() !== "webhook" || !isHttpsUrl(environment.IDENTITY_WEBHOOK_URL))) {
       errors.push("required identity verification needs IDENTITY_PROVIDER=webhook with an HTTPS IDENTITY_WEBHOOK_URL");
     }
+    if (!parseEnvBoolean(environment.ALLOW_PHOTO_DISABLED, false) && !hasConfiguredPhotoProvider(environment)) {
+      errors.push("production requires a photo analysis provider unless ALLOW_PHOTO_DISABLED=true");
+    }
+    if (parseEnvBoolean(environment.REQUIRE_SERVER_SPEECH, false) && !hasConfiguredSpeechProvider(environment)) {
+      errors.push("REQUIRE_SERVER_SPEECH=true needs valid WHISPER_COMMAND, WHISPER_MODEL, and FFMPEG_COMMAND files");
+    }
   }
 
   if (errors.length) {
@@ -226,6 +232,26 @@ function isHttpsUrl(value) {
 function parseEnvBoolean(value, fallback) {
   if (value == null || value === "") return fallback;
   return ["1", "true", "yes", "on"].includes(String(value).toLowerCase());
+}
+
+function hasConfiguredPhotoProvider(environment) {
+  return Boolean(
+    environment.LOCAL_MODEL_BASE_URL
+    || environment.OPENAI_API_KEY
+    || environment.OPENROUTER_API_KEY
+    || environment.OMINIGATE_API_KEY
+    || environment.OMNIGATE_API_KEY,
+  );
+}
+
+function hasConfiguredSpeechProvider(environment) {
+  const ffmpeg = environment.FFMPEG_COMMAND || "/usr/bin/ffmpeg";
+  return Boolean(
+    environment.WHISPER_COMMAND && environment.WHISPER_MODEL
+    && fs.existsSync(environment.WHISPER_COMMAND)
+    && fs.existsSync(environment.WHISPER_MODEL)
+    && fs.existsSync(ffmpeg)
+  );
 }
 
 function getAuthService() {
@@ -424,19 +450,40 @@ function handleStatus(req, res) {
     sendJson(res, 405, { error: "method_not_allowed", message: "请求方法不受支持。" });
     return;
   }
-  const localModel = Boolean(LOCAL_MODEL_BASE_URL);
-  const payload = {
-    ok: true,
-    photoAnalysis: localModel || Boolean(OPENAI_API_KEY || OPENROUTER_API_KEY || OMNI_API_KEY),
-    textAnalysis: localModel || Boolean(OMNI_API_KEY),
-    speechRecognition: isSpeechTranscriptionConfigured() ? "server" : "browser",
-  };
+  const payload = getServiceCapabilities();
   if (req.method === "HEAD") {
     res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
     res.end();
     return;
   }
   sendJson(res, 200, payload);
+}
+
+function getServiceCapabilities() {
+  const textModelMode = LOCAL_MODEL_BASE_URL ? "local-model" : OMNI_API_KEY ? "cloud-model" : "client-rules";
+  const photoMode = LOCAL_MODEL_BASE_URL
+    ? "local-model"
+    : OPENAI_API_KEY ? "openai-compatible"
+      : OPENROUTER_API_KEY ? "openrouter"
+        : OMNI_API_KEY ? "cloud-model" : "disabled";
+  const serverSpeech = isSpeechTranscriptionConfigured();
+  const photoAnalysis = photoMode !== "disabled";
+  const textModelAvailable = textModelMode !== "client-rules";
+  return {
+    ok: true,
+    statusVersion: 2,
+    photoAnalysis,
+    textAnalysis: true,
+    textModelAvailable,
+    textAnalysisMode: textModelMode,
+    speechRecognition: serverSpeech ? "server" : "browser",
+    capabilities: {
+      text: { available: true, mode: textModelMode },
+      photo: { available: photoAnalysis, mode: photoMode, reason: photoAnalysis ? null : "provider_not_configured" },
+      speechInput: { available: true, mode: serverSpeech ? "server" : "browser", secureContextRequired: true },
+      speechOutput: { available: true, mode: "browser" },
+    },
+  };
 }
 
 function readJsonBody(req, maxBytes) {
@@ -1082,6 +1129,7 @@ function getLocalModelChatEndpoint() {
 module.exports = {
   assertSafeRuntimeConfiguration,
   closeAuthService,
+  getServiceCapabilities,
   getAuthService,
   getLocalModelJsonContent,
   server,
