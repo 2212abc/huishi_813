@@ -153,10 +153,79 @@ const server = http.createServer(async (req, res) => {
 });
 
 if (require.main === module) {
-  server.listen(PORT, HOST, () => {
+  try {
+    startServer();
+  } catch (error) {
+    process.stderr.write(`[startup_blocked] ${String(error?.message || error)}\n`);
+    process.exitCode = 1;
+  }
+}
+
+function startServer() {
+  assertSafeRuntimeConfiguration(process.env);
+  getAuthService();
+  return server.listen(PORT, HOST, () => {
     const displayHost = HOST === "0.0.0.0" ? "127.0.0.1" : HOST;
     process.stdout.write(`HuiShi UI preview running at http://${displayHost}:${PORT}\n`);
   });
+}
+
+function assertSafeRuntimeConfiguration(environment = process.env) {
+  const nodeEnv = String(environment.NODE_ENV || "development").toLowerCase();
+  const host = String(environment.HOST || "127.0.0.1").trim().toLowerCase();
+  const production = nodeEnv === "production";
+  const devMode = parseEnvBoolean(environment.AUTH_DEV_MODE, false);
+  const errors = [];
+  const port = Number(environment.PORT || 8787);
+  const rateLimit = Number(environment.API_RATE_LIMIT || 30);
+  const upstreamTimeout = Number(environment.UPSTREAM_TIMEOUT_MS || 18_000);
+
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) errors.push("PORT must be an integer between 1 and 65535");
+  if (!Number.isInteger(rateLimit) || rateLimit < 1 || rateLimit > 10_000) errors.push("API_RATE_LIMIT must be an integer between 1 and 10000");
+  if (!Number.isFinite(upstreamTimeout) || upstreamTimeout < 1_000 || upstreamTimeout > 120_000) errors.push("UPSTREAM_TIMEOUT_MS must be between 1000 and 120000");
+
+  if (!isLoopbackHost(host) && devMode && !parseEnvBoolean(environment.PUBLIC_PILOT_ACKNOWLEDGED, false)) {
+    errors.push("public password-only registration requires PUBLIC_PILOT_ACKNOWLEDGED=true");
+  }
+
+  if (production) {
+    if (devMode) errors.push("AUTH_DEV_MODE must be false in production");
+    if (String(environment.AUTH_SECRET || "").length < 32) errors.push("AUTH_SECRET must contain at least 32 characters in production");
+    if (environment.COOKIE_SECURE !== "true") errors.push("COOKIE_SECURE must be true in production");
+    if (!parseEnvBoolean(environment.TRUST_PROXY, false)) errors.push("TRUST_PROXY must be true behind the production HTTPS proxy");
+    if (!environment.AUTH_DB_PATH || !path.isAbsolute(environment.AUTH_DB_PATH)) errors.push("AUTH_DB_PATH must be an absolute path in production");
+    if (String(environment.SMS_PROVIDER || "").toLowerCase() !== "webhook" || !isHttpsUrl(environment.SMS_WEBHOOK_URL)) {
+      errors.push("production registration and password recovery require SMS_PROVIDER=webhook with an HTTPS SMS_WEBHOOK_URL");
+    }
+    if (parseEnvBoolean(environment.IDENTITY_VERIFICATION_REQUIRED, false)
+      && (String(environment.IDENTITY_PROVIDER || "").toLowerCase() !== "webhook" || !isHttpsUrl(environment.IDENTITY_WEBHOOK_URL))) {
+      errors.push("required identity verification needs IDENTITY_PROVIDER=webhook with an HTTPS IDENTITY_WEBHOOK_URL");
+    }
+  }
+
+  if (errors.length) {
+    const error = new Error(`Unsafe runtime configuration:\n- ${errors.join("\n- ")}`);
+    error.code = "UNSAFE_RUNTIME_CONFIGURATION";
+    throw error;
+  }
+  return { nodeEnv, host, production };
+}
+
+function isLoopbackHost(host) {
+  return host === "localhost" || host === "::1" || host === "[::1]" || /^127(?:\.\d{1,3}){3}$/.test(host);
+}
+
+function isHttpsUrl(value) {
+  try {
+    return new URL(value).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function parseEnvBoolean(value, fallback) {
+  if (value == null || value === "") return fallback;
+  return ["1", "true", "yes", "on"].includes(String(value).toLowerCase());
 }
 
 function getAuthService() {
@@ -1011,6 +1080,7 @@ function getLocalModelChatEndpoint() {
 }
 
 module.exports = {
+  assertSafeRuntimeConfiguration,
   closeAuthService,
   getAuthService,
   getLocalModelJsonContent,
@@ -1018,6 +1088,7 @@ module.exports = {
   normalizeMealAnalysisJson,
   normalizeStatus,
   sanitizeProfile,
+  startServer,
   validateAudioPayload,
   validateImagePayload,
 };

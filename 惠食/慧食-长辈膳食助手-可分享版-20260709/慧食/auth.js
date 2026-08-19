@@ -31,7 +31,8 @@ function createAuthService(options = {}) {
   const smsProvider = options.smsProvider || createSmsProvider(environment, nodeEnv);
   const identityProvider = options.identityProvider || createIdentityProvider(environment, nodeEnv);
   const identityRequired = parseBoolean(environment.IDENTITY_VERIFICATION_REQUIRED, false);
-  const smsVerificationRequired = !(nodeEnv !== "production" && parseBoolean(environment.AUTH_DEV_MODE, false));
+  const registrationSmsRequired = !(nodeEnv !== "production" && parseBoolean(environment.AUTH_DEV_MODE, false));
+  const passwordResetSmsRequired = true;
   const secureCookies = environment.COOKIE_SECURE === "false" ? false : environment.COOKIE_SECURE === "true" ? true : "auto";
 
   migrate(database);
@@ -49,10 +50,16 @@ function createAuthService(options = {}) {
     return {
       smsReady: Boolean(smsProvider.ready),
       smsMode: smsProvider.mode || "disabled",
-      smsVerificationRequired,
+      smsVerificationRequired: registrationSmsRequired,
+      registrationSmsRequired,
+      passwordResetSmsRequired,
       identityReady: Boolean(identityProvider.ready),
       identityRequired,
     };
+  }
+
+  function getCookiePolicy() {
+    return secureCookies;
   }
 
   async function requestSms({ phone, purpose, ipAddress = "unknown" }) {
@@ -140,7 +147,7 @@ function createAuthService(options = {}) {
     if (database.prepare("SELECT 1 FROM users WHERE phone = ?").get(phone)) {
       throw new AuthError(409, "phone_already_registered", "该手机号已经注册，请直接登录。");
     }
-    const sms = smsVerificationRequired ? findValidSms(phone, "register", input.code) : null;
+    const sms = registrationSmsRequired ? findValidSms(phone, "register", input.code) : null;
     const passwordRecord = hashPassword(password, randomBytes);
     const userId = crypto.randomUUID();
     const currentTime = now();
@@ -198,7 +205,7 @@ function createAuthService(options = {}) {
   function resetPassword(input) {
     const phone = normalizePhone(input.phone);
     const password = validatePassword(input.password, phone);
-    const sms = smsVerificationRequired ? findValidSms(phone, "password_reset", input.code) : null;
+    const sms = passwordResetSmsRequired ? findValidSms(phone, "password_reset", input.code) : null;
     const user = database.prepare("SELECT id FROM users WHERE phone = ?").get(phone);
     const currentTime = now();
     if (!user) {
@@ -606,6 +613,7 @@ function createAuthService(options = {}) {
 
   return {
     close,
+    getCookiePolicy,
     getConfig,
     getFamilyStatus,
     getHealthData,
@@ -665,19 +673,19 @@ async function handleAuthRequest(service, req, res, pathname, helpers) {
     }
     if (pathname === "/api/auth/register") {
       const result = await service.register(body, context);
-      setSessionCookie(req, res, result.token, result.expiresAt, service.getConfig(), helpers.secureCookies);
+      setSessionCookie(req, res, result.token, result.expiresAt, service.getCookiePolicy());
       sendJson(res, 201, { authenticated: true, user: result.user });
       return;
     }
     if (pathname === "/api/auth/login") {
       const result = service.login(body, context);
-      setSessionCookie(req, res, result.token, result.expiresAt, service.getConfig(), helpers.secureCookies);
+      setSessionCookie(req, res, result.token, result.expiresAt, service.getCookiePolicy());
       sendJson(res, 200, { authenticated: true, user: result.user });
       return;
     }
     if (pathname === "/api/auth/logout") {
       service.logout(token);
-      clearSessionCookie(req, res, helpers.secureCookies);
+      clearSessionCookie(req, res, service.getCookiePolicy());
       sendJson(res, 200, { authenticated: false });
       return;
     }
@@ -1157,7 +1165,7 @@ function parseCookies(header) {
   }, {});
 }
 
-function setSessionCookie(req, res, token, expiresAt, _config, secureCookies = "auto") {
+function setSessionCookie(req, res, token, expiresAt, secureCookies = "auto") {
   const secure = secureCookies === true || (secureCookies === "auto" && isSecureRequest(req));
   const parts = [`${SESSION_COOKIE}=${encodeURIComponent(token)}`, "Path=/", "HttpOnly", "SameSite=Strict", `Expires=${new Date(expiresAt).toUTCString()}`];
   if (secure) parts.push("Secure");

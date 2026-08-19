@@ -9,6 +9,7 @@ process.env.AUTH_DB_PATH = path.join(authTestDirectory, "users.sqlite");
 process.env.AUTH_SECRET = "test-api-secret-with-more-than-thirty-two-characters";
 const {
   closeAuthService,
+  assertSafeRuntimeConfiguration,
   getLocalModelJsonContent,
   normalizeMealAnalysisJson,
   normalizeStatus,
@@ -75,7 +76,15 @@ test("auth status is anonymous and never exposes server secrets", async () => {
   const body = await response.json();
   assert.equal(body.authenticated, false);
   assert.equal(body.user, null);
-  assert.deepEqual(body.config, { smsReady: false, smsMode: "disabled", smsVerificationRequired: true, identityReady: false, identityRequired: false });
+  assert.deepEqual(body.config, {
+    smsReady: false,
+    smsMode: "disabled",
+    smsVerificationRequired: true,
+    registrationSmsRequired: true,
+    passwordResetSmsRequired: true,
+    identityReady: false,
+    identityRequired: false,
+  });
   assert.doesNotMatch(JSON.stringify(body), /test-api-secret/);
 });
 
@@ -90,6 +99,42 @@ test("auth mutations require JSON and validate phone numbers", async () => {
   });
   assert.equal(invalidPhone.status, 400);
   assert.equal((await invalidPhone.json()).error, "invalid_phone");
+});
+
+test("unsafe public and production runtime configurations fail before startup", () => {
+  assert.doesNotThrow(() => assertSafeRuntimeConfiguration({
+    NODE_ENV: "development",
+    HOST: "127.0.0.1",
+    AUTH_DEV_MODE: "true",
+  }));
+  assert.throws(
+    () => assertSafeRuntimeConfiguration({ NODE_ENV: "development", HOST: "0.0.0.0", AUTH_DEV_MODE: "true" }),
+    (error) => error.code === "UNSAFE_RUNTIME_CONFIGURATION" && /PUBLIC_PILOT_ACKNOWLEDGED/.test(error.message),
+  );
+  assert.doesNotThrow(() => assertSafeRuntimeConfiguration({
+    NODE_ENV: "development",
+    HOST: "0.0.0.0",
+    AUTH_DEV_MODE: "true",
+    PUBLIC_PILOT_ACKNOWLEDGED: "true",
+  }));
+  assert.throws(
+    () => assertSafeRuntimeConfiguration({ NODE_ENV: "production", HOST: "0.0.0.0", AUTH_DEV_MODE: "true" }),
+    (error) => error.code === "UNSAFE_RUNTIME_CONFIGURATION"
+      && /AUTH_DEV_MODE/.test(error.message)
+      && /COOKIE_SECURE/.test(error.message)
+      && /SMS_PROVIDER/.test(error.message),
+  );
+  assert.doesNotThrow(() => assertSafeRuntimeConfiguration({
+    NODE_ENV: "production",
+    HOST: "0.0.0.0",
+    AUTH_DEV_MODE: "false",
+    AUTH_SECRET: "production-secret-with-at-least-32-characters",
+    AUTH_DB_PATH: "/var/lib/huishi/huishi.sqlite",
+    COOKIE_SECURE: "true",
+    TRUST_PROXY: "true",
+    SMS_PROVIDER: "webhook",
+    SMS_WEBHOOK_URL: "https://sms.example.test/send",
+  }));
 });
 
 test("AI status and confidence normalization fail closed", () => {

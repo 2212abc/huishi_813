@@ -230,7 +230,7 @@ let roleLastFocusedElement = null;
 let lastPhotoFile = null;
 let largestViewportHeight = window.visualViewport?.height || window.innerHeight;
 let serviceStatus = { photoAnalysis: false, textAnalysis: false, speechRecognition: "browser", checked: false };
-let authConfig = { smsReady: false, smsMode: "disabled", smsVerificationRequired: true, identityReady: false, identityRequired: false, checked: false };
+let authConfig = { smsReady: false, smsMode: "disabled", registrationSmsRequired: true, passwordResetSmsRequired: true, identityReady: false, identityRequired: false, checked: false };
 let authBusy = false;
 let authCodeCooldown = 0;
 let authCodeTimer = null;
@@ -617,7 +617,9 @@ function renderAuth() {
   const isAuthScreen = state.screen === "login" || !state.auth?.loggedIn;
   $(".app-shell").classList.toggle("is-auth-screen", isAuthScreen);
   const mode = ["login", "register", "reset"].includes(state.auth?.authMode) ? state.auth.authMode : "login";
-  const needsSms = mode !== "login" && authConfig.smsVerificationRequired !== false;
+  const needsSms = mode === "register"
+    ? (authConfig.registrationSmsRequired ?? authConfig.smsVerificationRequired) !== false
+    : mode === "reset" ? authConfig.passwordResetSmsRequired !== false : false;
   $$("[data-auth-mode]").forEach((button) => button.classList.toggle("is-active", button.dataset.authMode === mode));
   $$("[data-auth-register]").forEach((node) => { node.hidden = mode !== "register"; });
   $$("[data-auth-code]").forEach((node) => { node.hidden = !needsSms; });
@@ -632,7 +634,7 @@ function renderAuth() {
   $("#loginIntro").textContent = mode === "register"
     ? needsSms ? "验证手机号并设置密码，之后可在这台设备安全登录。" : "测试期间直接使用手机号设置密码。"
     : mode === "reset"
-      ? needsSms ? "通过短信验证码设置新密码。" : "测试期间直接为已注册手机号设置新密码。"
+      ? "通过短信验证码设置新密码。"
       : "登录后继续使用语音记餐、拍照识别和健康提醒。";
   $("#authPasswordLabel").textContent = mode === "login" ? "密码" : "设置新密码";
   $("#authPassword").autocomplete = mode === "login" ? "current-password" : "new-password";
@@ -642,7 +644,7 @@ function renderAuth() {
   $("#forgotPassword").textContent = mode === "reset" ? "返回登录" : "忘记密码";
   $("#authHelper").textContent = mode === "login"
     ? "账号密码经过安全哈希处理，服务器不会保存明文密码。"
-    : !needsSms
+    : mode === "register" && !needsSms
       ? "当前为测试模式，无需短信验证码；密码请勿使用连续或重复数字。"
       : mode === "register"
         ? "短信验证码 5 分钟内有效；密码请勿使用连续或重复数字。"
@@ -653,7 +655,7 @@ function renderAuth() {
     serviceNotice.textContent = !authConfig.checked
       ? "正在检查账号服务…"
       : !needsSms
-        ? "当前为测试模式：无需短信验证码，手机号会作为账号唯一标识。"
+        ? "当前为测试注册模式：无需短信验证码，手机号会作为账号唯一标识。找回密码仍需短信验证。"
       : !authConfig.smsReady
         ? "短信服务正在配置，暂时不能注册或找回密码。"
         : authConfig.smsMode === "debug"

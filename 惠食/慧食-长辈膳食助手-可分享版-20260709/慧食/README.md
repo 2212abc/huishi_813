@@ -35,7 +35,7 @@ npm start
 NODE_ENV=production
 AUTH_DB_PATH=/var/lib/huishi/huishi.sqlite
 AUTH_SECRET=请使用至少32字符的随机密钥
-COOKIE_SECURE=auto
+COOKIE_SECURE=true
 TRUST_PROXY=true
 ```
 
@@ -66,7 +66,9 @@ SMS_WEBHOOK_TOKEN=
 
 Webhook 返回任意 `2xx` 即表示服务商已接受发送。`purpose` 可能为 `register` 或 `password_reset`。
 
-本地联调可显式设置 `AUTH_DEV_MODE=true`，此时注册和找回密码不要求短信验证码，手机号仍由数据库唯一约束保证一号一用户。该绕过在生产环境强制失效。若要单独联调短信链路，可同时设置 `SMS_PROVIDER=console`，验证码会写入服务器终端；正式环境的 HTTP 响应不会返回验证码。
+本地联调可显式设置 `AUTH_DEV_MODE=true`，此时只有注册不要求短信验证码，手机号仍由数据库唯一约束保证一号一用户；找回密码始终要求短信验证，不能被测试模式绕过。该注册模式在生产环境强制失效；若在非生产公网试用服务器启用，还必须设置 `PUBLIC_PILOT_ACKNOWLEDGED=true` 明确确认手机号尚未完成归属验证。若要单独联调短信链路，可同时设置 `SMS_PROVIDER=console`，验证码会写入服务器终端；正式环境的 HTTP 响应不会返回验证码。
+
+服务启动时会进行生产配置预检。生产环境缺少安全会话密钥、HTTPS 短信 Webhook、绝对数据库路径、安全 Cookie 或可信代理配置时会直接拒绝启动，避免带着测试配置上线。
 
 ## 手机号实名认证
 

@@ -284,7 +284,7 @@ test("family invite codes create a persistent relation and are single-use", () =
   );
 });
 
-test("development mode can register and reset without SMS while keeping phone unique", async () => {
+test("development mode can register without SMS but never bypasses password recovery", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "huishi-auth-dev-"));
   const devService = createAuthService({
     dbPath: path.join(directory, "users.sqlite"),
@@ -292,22 +292,46 @@ test("development mode can register and reset without SMS while keeping phone un
     environment: { NODE_ENV: "development", AUTH_DEV_MODE: "true" },
   });
   try {
-    assert.equal(devService.getConfig().smsVerificationRequired, false);
+    assert.equal(devService.getConfig().registrationSmsRequired, false);
+    assert.equal(devService.getConfig().passwordResetSmsRequired, true);
     const registered = await devService.register({ phone: "13500135000", password: "dev-password-135" });
     assert.equal(registered.user.phone, "135****5000");
     await assert.rejects(
       devService.register({ phone: "13500135000", password: "another-password-135" }),
       (error) => error.code === "phone_already_registered",
     );
-    devService.resetPassword({ phone: "13500135000", password: "reset-password-135" });
-    assert.equal(devService.login({ phone: "13500135000", password: "reset-password-135" }).user.id, registered.user.id);
+    assert.throws(
+      () => devService.resetPassword({ phone: "13500135000", password: "reset-password-135" }),
+      (error) => error.code === "invalid_sms_code",
+    );
+    assert.equal(devService.login({ phone: "13500135000", password: "dev-password-135" }).user.id, registered.user.id);
   } finally {
     devService.close();
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
 
-async function callAuthHandler(pathname, method, body, extraHeaders = {}) {
+test("COOKIE_SECURE=true is enforced for sessions behind an internal HTTP hop", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "huishi-auth-cookie-"));
+  const secureService = createAuthService({
+    dbPath: path.join(directory, "users.sqlite"),
+    secret: "cookie-policy-test-secret-with-thirty-two-characters",
+    environment: { NODE_ENV: "development", AUTH_DEV_MODE: "true", COOKIE_SECURE: "true" },
+  });
+  try {
+    const registered = await callAuthHandler("/api/auth/register", "POST", {
+      phone: "13300133000",
+      password: "secure-cookie-password-133",
+    }, {}, secureService);
+    assert.equal(registered.status, 201);
+    assert.match(registered.headers["Set-Cookie"], /; Secure(?:;|$)/);
+  } finally {
+    secureService.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+async function callAuthHandler(pathname, method, body, extraHeaders = {}, targetService = service) {
   const response = {
     headers: {},
     setHeader(name, value) { this.headers[name] = value; },
@@ -318,7 +342,7 @@ async function callAuthHandler(pathname, method, body, extraHeaders = {}) {
     socket: { remoteAddress: "127.0.0.10" },
     testBody: body,
   };
-  await handleAuthRequest(service, request, response, pathname, {
+  await handleAuthRequest(targetService, request, response, pathname, {
     readJsonBody: async (req) => req.testBody,
     sendJson(res, status, data) {
       res.status = status;
