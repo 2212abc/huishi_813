@@ -51,23 +51,31 @@ test("phone and Chinese ID validation reject malformed values", () => {
   assert.equal(isValidChineseIdChecksum("110105194912310021"), false);
 });
 
-test("registration stores hashes, creates a session, and never stores a raw ID number", async () => {
+test("registration stores hashes and defers role, nickname, and identity until after signup", async () => {
   const phone = "13800138000";
   await service.requestSms({ phone, purpose: "register", ipAddress: "127.0.0.1" });
   const result = await service.register({
     phone,
     code: sentCodes.get(`${phone}:register`),
     password: "meal-safe-2026",
-    nickname: "王阿姨",
-    role: "elder",
-    realName: "王敏",
-    idNumber: "11010519491231002X",
   }, { ipAddress: "127.0.0.1", userAgent: "test" });
 
-  assert.equal(result.user.nickname, "王阿姨");
+  assert.equal(result.user.nickname, "");
+  assert.equal(result.user.onboardingComplete, false);
   assert.equal(result.user.phone, "138****8000");
-  assert.equal(result.user.identityStatus, "verified");
+  assert.equal(result.user.identityStatus, "unverified");
   assert.equal(service.getSession(result.token).user.id, result.user.id);
+
+  const roleUser = service.updateRole(result.user.id, { role: "family" });
+  assert.equal(roleUser.role, "family");
+  assert.equal(roleUser.onboardingComplete, true);
+  const profileUser = service.updateProfile(result.user.id, { nickname: "王阿姨" });
+  assert.equal(profileUser.nickname, "王阿姨");
+  const verifiedUser = await service.verifyCurrentIdentity(result.user.id, {
+    realName: "王敏",
+    idNumber: "11010519491231002X",
+  });
+  assert.equal(verifiedUser.identityStatus, "verified");
 
   const db = new DatabaseSync(dbPath, { readOnly: true });
   const stored = db.prepare("SELECT * FROM users WHERE id = ?").get(result.user.id);
@@ -92,20 +100,12 @@ test("SMS codes are single-use and requests are throttled", async () => {
     phone,
     code,
     password: "safe-password-139",
-    nickname: "家属",
-    role: "family",
-    realName: "李华",
-    idNumber: "11010519491231002X",
   });
   await assert.rejects(
     service.register({
       phone: "13700137000",
       code,
       password: "safe-password-137",
-      nickname: "测试",
-      role: "elder",
-      realName: "李华",
-      idNumber: "11010519491231002X",
     }),
     (error) => ["sms_code_expired", "invalid_sms_code"].includes(error.code),
   );
@@ -143,10 +143,6 @@ test("HTTP auth handler issues a secure cookie and restores the session", async 
     phone,
     code: sentCodes.get(`${phone}:register`),
     password: "safe-password-136",
-    nickname: "照护人",
-    role: "family",
-    realName: "李华",
-    idNumber: "11010519491231002X",
   }, { "x-forwarded-proto": "https" });
   assert.equal(register.status, 201);
   assert.match(register.headers["Set-Cookie"], /^huishi_session=/);
@@ -154,12 +150,74 @@ test("HTTP auth handler issues a secure cookie and restores the session", async 
   assert.match(register.headers["Set-Cookie"], /SameSite=Strict/);
   assert.match(register.headers["Set-Cookie"], /Secure/);
 
+  const cookieHeaders = { cookie: register.headers["Set-Cookie"] };
+  const role = await callAuthHandler("/api/auth/role", "POST", { role: "family" }, cookieHeaders);
+  assert.equal(role.status, 200);
+  assert.equal(role.body.user.role, "family");
+  assert.equal(role.body.user.onboardingComplete, true);
+  const profile = await callAuthHandler("/api/auth/profile", "POST", { nickname: "照护人" }, cookieHeaders);
+  assert.equal(profile.status, 200);
+  assert.equal(profile.body.user.nickname, "照护人");
+
   const status = await callAuthHandler("/api/auth/status", "GET", undefined, {
     cookie: register.headers["Set-Cookie"],
   });
   assert.equal(status.status, 200);
   assert.equal(status.body.authenticated, true);
   assert.equal(status.body.user.nickname, "照护人");
+});
+
+test("family invite codes create a persistent relation and are single-use", () => {
+  const elder = service.login({ phone: "13900139000", password: "safe-password-139" }).user;
+  const family = service.login({ phone: "13600136000", password: "safe-password-136" }).user;
+  service.updateRole(elder.id, { role: "elder" });
+  service.updateRole(family.id, { role: "family" });
+  service.updateProfile(elder.id, { nickname: "张叔" });
+
+  const invite = service.createFamilyInvite(elder.id);
+  assert.match(invite.code, /^\d{6}$/);
+  assert.equal(invite.expiresIn, 600);
+  const bound = service.bindFamily(family.id, { code: invite.code });
+  assert.equal(bound.linked.length, 1);
+  assert.equal(bound.linked[0].relationship, "elder");
+  assert.equal(bound.linked[0].user.nickname, "张叔");
+  assert.equal(service.getFamilyStatus(elder.id).linked[0].relationship, "family");
+  assert.throws(
+    () => service.bindFamily(family.id, { code: invite.code }),
+    (error) => error.code === "family_code_expired",
+  );
+
+  const db = new DatabaseSync(dbPath, { readOnly: true });
+  const storedInvite = db.prepare("SELECT code_hash FROM family_invites WHERE elder_user_id = ?").get(elder.id);
+  db.close();
+  assert.notEqual(storedInvite.code_hash, invite.code);
+
+  const unbound = service.unbindFamily(family.id, { relationId: bound.linked[0].id });
+  assert.equal(unbound.linked.length, 0);
+  assert.equal(service.getFamilyStatus(elder.id).linked.length, 0);
+});
+
+test("development mode can register and reset without SMS while keeping phone unique", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "huishi-auth-dev-"));
+  const devService = createAuthService({
+    dbPath: path.join(directory, "users.sqlite"),
+    secret: "development-test-secret-with-thirty-two-characters",
+    environment: { NODE_ENV: "development", AUTH_DEV_MODE: "true" },
+  });
+  try {
+    assert.equal(devService.getConfig().smsVerificationRequired, false);
+    const registered = await devService.register({ phone: "13500135000", password: "dev-password-135" });
+    assert.equal(registered.user.phone, "135****5000");
+    await assert.rejects(
+      devService.register({ phone: "13500135000", password: "another-password-135" }),
+      (error) => error.code === "phone_already_registered",
+    );
+    devService.resetPassword({ phone: "13500135000", password: "reset-password-135" });
+    assert.equal(devService.login({ phone: "13500135000", password: "reset-password-135" }).user.id, registered.user.id);
+  } finally {
+    devService.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 async function callAuthHandler(pathname, method, body, extraHeaders = {}) {

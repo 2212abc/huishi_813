@@ -38,6 +38,12 @@ const AUTH_API_PATHS = new Set([
   "/api/auth/logout",
   "/api/auth/password-reset/request",
   "/api/auth/password-reset/confirm",
+  "/api/auth/role",
+  "/api/auth/profile",
+  "/api/auth/family/status",
+  "/api/auth/family/invite",
+  "/api/auth/family/bind",
+  "/api/auth/family/unbind",
   "/api/auth/identity/verify",
 ]);
 const API_PATHS = new Set([

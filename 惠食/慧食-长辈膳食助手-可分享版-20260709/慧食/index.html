@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#f6e4d8" />
     <title>慧食·长辈膳食助手</title>
-    <link rel="stylesheet" href="./styles.css?v=20260814a" />
+    <link rel="stylesheet" href="./styles.css?v=20260818b" />
   </head>
   <body>
     <svg class="icon-sprite" aria-hidden="true">
@@ -60,28 +60,6 @@
             <p class="auth-service-notice" id="authServiceNotice" role="status">正在检查账号服务…</p>
             <p class="auth-error" id="authError" role="alert" hidden></p>
 
-            <fieldset class="auth-role-field" data-auth-register hidden>
-              <legend>选择身份</legend>
-              <div class="role-grid">
-                <label class="role-card is-active">
-                  <input type="radio" name="authRole" value="elder" checked />
-                  <span><svg><use href="#i-user"></use></svg></span>
-                  <strong>我是长辈</strong>
-                  <small>记录饮食，拍照问一问</small>
-                </label>
-                <label class="role-card">
-                  <input type="radio" name="authRole" value="family" />
-                  <span><svg><use href="#i-family"></use></svg></span>
-                  <strong>我是家人</strong>
-                  <small>查看本机记录，协助建档案</small>
-                </label>
-              </div>
-            </fieldset>
-
-            <label class="auth-label" for="authName" data-auth-register hidden>姓名或昵称
-              <input id="authName" type="text" autocomplete="name" placeholder="例如：妈妈、女儿" />
-            </label>
-
             <label class="auth-label" for="authPhone">手机号
               <input id="authPhone" type="tel" autocomplete="tel-national" inputmode="numeric" maxlength="11" placeholder="请输入 11 位手机号" />
             </label>
@@ -100,19 +78,6 @@
             <label class="auth-label" for="authPasswordConfirm" data-auth-new-password hidden>确认新密码
               <input id="authPasswordConfirm" type="password" autocomplete="new-password" maxlength="72" placeholder="再次输入密码" />
             </label>
-
-            <section class="identity-fields" id="identityFields" data-auth-register hidden>
-              <div>
-                <strong>手机号实名认证</strong>
-                <p>姓名和身份证号只用于服务商核验，身份证号不会保存到慧食数据库。</p>
-              </div>
-              <label class="auth-label" for="authRealName">真实姓名
-                <input id="authRealName" type="text" autocomplete="name" maxlength="30" placeholder="与身份证一致" />
-              </label>
-              <label class="auth-label" for="authIdNumber">身份证号
-                <input id="authIdNumber" type="text" autocomplete="off" inputmode="text" maxlength="18" placeholder="18 位身份证号" />
-              </label>
-            </section>
 
             <button class="consent-row consent-toggle" id="privacyConsent" data-auth-register type="button" role="checkbox" aria-checked="false" hidden>
               <span class="consent-check" aria-hidden="true"><svg><use href="#i-check"></use></svg></span>
@@ -193,6 +158,7 @@
 
             <fieldset class="step-panel" data-step="basic">
               <legend>基础信息</legend>
+              <label>姓名或昵称<input id="nicknameInput" type="text" autocomplete="name" maxlength="30" placeholder="例如：王阿姨、妈妈" /></label>
               <label>年龄<input id="ageInput" type="number" min="45" max="110" inputmode="numeric" /></label>
               <label>性别<select id="sexInput"><option value="female">女</option><option value="male">男</option></select></label>
               <label>身高 cm<input id="heightInput" type="number" min="120" max="210" inputmode="decimal" /></label>
@@ -337,7 +303,7 @@
             <div class="score-badge">本机</div>
           </section>
           <div class="family-top-actions">
-            <button class="secondary-button family-action-button" id="bindFamily" type="button">家庭绑定说明</button>
+            <button class="secondary-button family-action-button" id="bindFamily" type="button">家人绑定</button>
             <button class="secondary-button family-action-button" id="familyProfileHelp" type="button" data-family-action="profile">帮长辈完善档案</button>
           </div>
           <div class="family-grid" id="familyGrid">
@@ -371,18 +337,42 @@
     </div>
 
     <div class="bind-modal" id="bindModal" hidden role="dialog" aria-modal="true" aria-labelledby="bindTitle">
-      <div class="bind-sheet">
-        <button class="modal-close" id="closeBindModal" type="button" aria-label="关闭家庭绑定说明"><svg><use href="#i-close"></use></svg></button>
-        <p class="eyebrow">功能状态</p>
-        <h2 id="bindTitle">家庭绑定尚未启用</h2>
-        <p class="bind-code" id="bindCodeText">当前为本机封闭试用</p>
-        <p class="bind-hint">家人视图只能读取这台设备上的记录。系统不会生成绑定码，也不会把健康档案或提醒同步到其他设备。</p>
+      <div class="bind-sheet" id="bindSheet">
+        <button class="modal-close" id="closeBindModal" type="button" aria-label="关闭家人绑定"><svg><use href="#i-close"></use></svg></button>
+        <div id="bindContent">
+          <p class="eyebrow">家人绑定</p>
+          <h2 id="bindTitle">正在读取绑定状态</h2>
+          <p class="bind-hint">请稍候。</p>
+        </div>
       </div>
     </div>
     <div class="meal-result-modal" id="mealResultModal" hidden role="dialog" aria-modal="true" aria-labelledby="mealResultTitle">
       <div class="meal-result-sheet" id="mealResultSheet"></div>
     </div>
+    <div class="role-modal" id="roleModal" hidden role="dialog" aria-modal="true" aria-labelledby="roleModalTitle">
+      <div class="role-sheet">
+        <button class="modal-close role-modal-close" id="closeRoleModal" type="button" aria-label="关闭身份选择"><svg><use href="#i-close"></use></svg></button>
+        <p class="eyebrow">进入慧食</p>
+        <h2 id="roleModalTitle">请选择本次使用身份</h2>
+        <p class="role-modal-intro">登录后再选择，之后也可以在首页顶部随时切换。</p>
+        <div class="role-grid" role="radiogroup" aria-label="使用身份">
+          <button class="role-card is-active" type="button" data-session-role="elder" role="radio" aria-checked="true">
+            <span><svg><use href="#i-user"></use></svg></span>
+            <strong>我是长辈</strong>
+            <small>记录饮食，语音问一问</small>
+          </button>
+          <button class="role-card" type="button" data-session-role="family" role="radio" aria-checked="false">
+            <span><svg><use href="#i-family"></use></svg></span>
+            <strong>我是家人</strong>
+            <small>查看记录，协助完善档案</small>
+          </button>
+        </div>
+        <p class="auth-error" id="roleError" role="alert" hidden></p>
+        <button class="primary-button role-confirm" id="confirmRole" type="button">确认身份</button>
+        <button class="text-button role-logout" id="roleLogout" type="button">退出当前账号</button>
+      </div>
+    </div>
     <div class="toast" id="toast" hidden role="status" aria-live="polite"></div>
-    <script src="./app.js?v=20260814a"></script>
+    <script src="./app.js?v=20260818b"></script>
   </body>
 </html>

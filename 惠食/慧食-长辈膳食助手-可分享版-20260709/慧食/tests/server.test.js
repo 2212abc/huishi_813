@@ -75,7 +75,7 @@ test("auth status is anonymous and never exposes server secrets", async () => {
   const body = await response.json();
   assert.equal(body.authenticated, false);
   assert.equal(body.user, null);
-  assert.deepEqual(body.config, { smsReady: false, identityReady: false, identityRequired: false });
+  assert.deepEqual(body.config, { smsReady: false, smsMode: "disabled", smsVerificationRequired: true, identityReady: false, identityRequired: false });
   assert.doesNotMatch(JSON.stringify(body), /test-api-secret/);
 });
 

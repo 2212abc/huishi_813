@@ -8,6 +8,7 @@ const SESSION_COOKIE = "huishi_session";
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const SMS_TTL_MS = 5 * 60 * 1000;
 const SMS_COOLDOWN_MS = 60 * 1000;
+const FAMILY_INVITE_TTL_MS = 10 * 60 * 1000;
 const PASSWORD_KEY_LENGTH = 32;
 const PASSWORD_SCRYPT_OPTIONS = { N: 16384, r: 8, p: 1, maxmem: 64 * 1024 * 1024 };
 
@@ -30,6 +31,7 @@ function createAuthService(options = {}) {
   const smsProvider = options.smsProvider || createSmsProvider(environment, nodeEnv);
   const identityProvider = options.identityProvider || createIdentityProvider(environment, nodeEnv);
   const identityRequired = parseBoolean(environment.IDENTITY_VERIFICATION_REQUIRED, false);
+  const smsVerificationRequired = !(nodeEnv !== "production" && parseBoolean(environment.AUTH_DEV_MODE, false));
   const secureCookies = environment.COOKIE_SECURE === "false" ? false : environment.COOKIE_SECURE === "true" ? true : "auto";
 
   migrate(database);
@@ -46,6 +48,8 @@ function createAuthService(options = {}) {
   function getConfig() {
     return {
       smsReady: Boolean(smsProvider.ready),
+      smsMode: smsProvider.mode || "disabled",
+      smsVerificationRequired,
       identityReady: Boolean(identityProvider.ready),
       identityRequired,
     };
@@ -102,7 +106,13 @@ function createAuthService(options = {}) {
       throw new AuthError(502, "sms_send_failed", "验证码发送失败，请稍后再试。");
     }
     cleanupExpired(currentTime);
-    return { accepted: true, expiresIn: 300, retryAfter: 60 };
+    return {
+      accepted: true,
+      expiresIn: 300,
+      retryAfter: 60,
+      delivery: smsProvider.mode || "live",
+      ...(smsProvider.mode === "debug" ? { debugCode: code } : {}),
+    };
   }
 
   function findValidSms(phone, purpose, code) {
@@ -127,18 +137,10 @@ function createAuthService(options = {}) {
   async function register(input, context = {}) {
     const phone = normalizePhone(input.phone);
     const password = validatePassword(input.password, phone);
-    const nickname = normalizeNickname(input.nickname);
-    const role = input.role === "family" ? "family" : "elder";
     if (database.prepare("SELECT 1 FROM users WHERE phone = ?").get(phone)) {
       throw new AuthError(409, "phone_already_registered", "该手机号已经注册，请直接登录。");
     }
-    const sms = findValidSms(phone, "register", input.code);
-    const identity = await verifyIdentityInput({
-      phone,
-      realName: input.realName,
-      idNumber: input.idNumber,
-      required: identityRequired,
-    });
+    const sms = smsVerificationRequired ? findValidSms(phone, "register", input.code) : null;
     const passwordRecord = hashPassword(password, randomBytes);
     const userId = crypto.randomUUID();
     const currentTime = now();
@@ -146,29 +148,21 @@ function createAuthService(options = {}) {
     runTransaction(database, () => {
       database.prepare(`
         INSERT INTO users
-        (id, phone, password_hash, password_salt, password_params, nickname, role,
+        (id, phone, password_hash, password_salt, password_params, nickname, role, onboarding_completed,
          identity_status, identity_name_masked, identity_subject_hash, identity_provider,
          identity_reference, identity_verified_at, failed_login_attempts, locked_until,
          created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, ?)
+        VALUES (?, ?, ?, ?, ?, '', 'elder', 0, 'unverified', NULL, NULL, NULL, NULL, NULL, 0, NULL, ?, ?)
       `).run(
         userId,
         phone,
         passwordRecord.hash,
         passwordRecord.salt,
         JSON.stringify(passwordRecord.params),
-        nickname,
-        role,
-        identity.status,
-        identity.maskedName,
-        identity.subjectHash ? hmac(`identity:${identity.subjectHash}`) : null,
-        identity.provider,
-        identity.reference,
-        identity.verifiedAt,
         currentTime,
         currentTime,
       );
-      database.prepare("UPDATE sms_codes SET consumed_at = ? WHERE id = ?").run(currentTime, sms.id);
+      if (sms) database.prepare("UPDATE sms_codes SET consumed_at = ? WHERE id = ?").run(currentTime, sms.id);
     });
     const session = createSession(userId, context);
     return { user: getPublicUser(userId), ...session };
@@ -198,18 +192,17 @@ function createAuthService(options = {}) {
   }
 
   async function requestPasswordReset(input, context = {}) {
-    await requestSms({ phone: input.phone, purpose: "password_reset", ipAddress: context.ipAddress });
-    return { accepted: true, expiresIn: 300, retryAfter: 60 };
+    return requestSms({ phone: input.phone, purpose: "password_reset", ipAddress: context.ipAddress });
   }
 
   function resetPassword(input) {
     const phone = normalizePhone(input.phone);
     const password = validatePassword(input.password, phone);
-    const sms = findValidSms(phone, "password_reset", input.code);
+    const sms = smsVerificationRequired ? findValidSms(phone, "password_reset", input.code) : null;
     const user = database.prepare("SELECT id FROM users WHERE phone = ?").get(phone);
     const currentTime = now();
     if (!user) {
-      database.prepare("UPDATE sms_codes SET consumed_at = ? WHERE id = ?").run(currentTime, sms.id);
+      if (sms) database.prepare("UPDATE sms_codes SET consumed_at = ? WHERE id = ?").run(currentTime, sms.id);
       throw new AuthError(400, "reset_not_available", "无法重置该账号，请确认手机号后再试。");
     }
     const passwordRecord = hashPassword(password, randomBytes);
@@ -218,10 +211,125 @@ function createAuthService(options = {}) {
         UPDATE users SET password_hash = ?, password_salt = ?, password_params = ?,
           failed_login_attempts = 0, locked_until = NULL, updated_at = ? WHERE id = ?
       `).run(passwordRecord.hash, passwordRecord.salt, JSON.stringify(passwordRecord.params), currentTime, user.id);
-      database.prepare("UPDATE sms_codes SET consumed_at = ? WHERE id = ?").run(currentTime, sms.id);
+      if (sms) database.prepare("UPDATE sms_codes SET consumed_at = ? WHERE id = ?").run(currentTime, sms.id);
       database.prepare("DELETE FROM sessions WHERE user_id = ?").run(user.id);
     });
     return { reset: true };
+  }
+
+  function updateRole(userId, input) {
+    const role = input.role === "family" ? "family" : input.role === "elder" ? "elder" : null;
+    if (!role) throw new AuthError(400, "invalid_role", "请选择长辈或家人身份。");
+    const result = database.prepare(`
+      UPDATE users SET role = ?, onboarding_completed = 1, updated_at = ? WHERE id = ?
+    `).run(role, now(), userId);
+    if (!result.changes) throw new AuthError(401, "not_authenticated", "请先登录。");
+    return getPublicUser(userId);
+  }
+
+  function updateProfile(userId, input) {
+    const nickname = normalizeNickname(input.nickname);
+    const result = database.prepare("UPDATE users SET nickname = ?, updated_at = ? WHERE id = ?").run(nickname, now(), userId);
+    if (!result.changes) throw new AuthError(401, "not_authenticated", "请先登录。");
+    return getPublicUser(userId);
+  }
+
+  function getFamilyStatus(userId) {
+    const user = database.prepare("SELECT id, role FROM users WHERE id = ?").get(userId);
+    if (!user) throw new AuthError(401, "not_authenticated", "请先登录。");
+    const linked = database.prepare(`
+      SELECT family_relations.id, family_relations.elder_user_id, family_relations.family_user_id,
+        family_relations.created_at,
+        elder.nickname AS elder_nickname, elder.phone AS elder_phone,
+        family.nickname AS family_nickname, family.phone AS family_phone
+      FROM family_relations
+      JOIN users AS elder ON elder.id = family_relations.elder_user_id
+      JOIN users AS family ON family.id = family_relations.family_user_id
+      WHERE family_relations.elder_user_id = ? OR family_relations.family_user_id = ?
+      ORDER BY family_relations.created_at DESC
+    `).all(userId, userId).map((relation) => {
+      const viewingAsElder = relation.elder_user_id === userId;
+      return {
+        id: relation.id,
+        relationship: viewingAsElder ? "family" : "elder",
+        user: {
+          id: viewingAsElder ? relation.family_user_id : relation.elder_user_id,
+          nickname: viewingAsElder ? relation.family_nickname : relation.elder_nickname,
+          phone: maskPhone(viewingAsElder ? relation.family_phone : relation.elder_phone),
+        },
+        createdAt: relation.created_at,
+      };
+    });
+    const activeInvite = database.prepare(`
+      SELECT expires_at FROM family_invites
+      WHERE elder_user_id = ? AND consumed_at IS NULL AND expires_at > ?
+      ORDER BY created_at DESC LIMIT 1
+    `).get(userId, now());
+    return {
+      role: user.role,
+      linked,
+      hasActiveInvite: Boolean(activeInvite),
+      inviteExpiresAt: activeInvite?.expires_at || null,
+    };
+  }
+
+  function createFamilyInvite(userId) {
+    const user = database.prepare("SELECT id, role FROM users WHERE id = ?").get(userId);
+    if (!user) throw new AuthError(401, "not_authenticated", "请先登录。");
+    if (user.role !== "elder") throw new AuthError(403, "elder_role_required", "请先切换到长辈身份再生成绑定码。");
+    const currentTime = now();
+    database.prepare("DELETE FROM family_invites WHERE expires_at <= ? OR consumed_at IS NOT NULL").run(currentTime);
+    database.prepare("DELETE FROM family_invites WHERE elder_user_id = ? AND consumed_at IS NULL").run(userId);
+    let code;
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      const candidate = String(crypto.randomInt(100000, 1000000));
+      const existing = database.prepare("SELECT 1 FROM family_invites WHERE code_hash = ?").get(hmac(`family-invite:${candidate}`));
+      if (!existing) {
+        code = candidate;
+        break;
+      }
+    }
+    if (!code) throw new AuthError(503, "invite_unavailable", "暂时无法生成绑定码，请稍后重试。");
+    const expiresAt = currentTime + FAMILY_INVITE_TTL_MS;
+    database.prepare(`
+      INSERT INTO family_invites (id, elder_user_id, code_hash, expires_at, consumed_at, created_at)
+      VALUES (?, ?, ?, ?, NULL, ?)
+    `).run(crypto.randomUUID(), userId, hmac(`family-invite:${code}`), expiresAt, currentTime);
+    return { code, expiresAt, expiresIn: 600 };
+  }
+
+  function bindFamily(userId, input) {
+    const user = database.prepare("SELECT id, role FROM users WHERE id = ?").get(userId);
+    if (!user) throw new AuthError(401, "not_authenticated", "请先登录。");
+    if (user.role !== "family") throw new AuthError(403, "family_role_required", "请先切换到家人身份再输入绑定码。");
+    const code = String(input.code || "").trim();
+    if (!/^\d{6}$/.test(code)) throw new AuthError(400, "invalid_family_code", "请输入 6 位家人绑定码。");
+    const currentTime = now();
+    const invite = database.prepare(`
+      SELECT * FROM family_invites
+      WHERE code_hash = ? AND consumed_at IS NULL AND expires_at > ?
+    `).get(hmac(`family-invite:${code}`), currentTime);
+    if (!invite) throw new AuthError(400, "family_code_expired", "绑定码无效或已过期，请让长辈重新生成。");
+    if (invite.elder_user_id === userId) throw new AuthError(400, "cannot_bind_self", "不能绑定自己的账号。");
+    runTransaction(database, () => {
+      database.prepare(`
+        INSERT OR IGNORE INTO family_relations (id, elder_user_id, family_user_id, created_at)
+        VALUES (?, ?, ?, ?)
+      `).run(crypto.randomUUID(), invite.elder_user_id, userId, currentTime);
+      database.prepare("UPDATE family_invites SET consumed_at = ? WHERE id = ?").run(currentTime, invite.id);
+    });
+    return getFamilyStatus(userId);
+  }
+
+  function unbindFamily(userId, input) {
+    const relationId = String(input.relationId || "").trim();
+    if (!relationId) throw new AuthError(400, "relation_required", "请选择要解除的家人关系。");
+    const result = database.prepare(`
+      DELETE FROM family_relations
+      WHERE id = ? AND (elder_user_id = ? OR family_user_id = ?)
+    `).run(relationId, userId, userId);
+    if (!result.changes) throw new AuthError(404, "relation_not_found", "没有找到该家人关系。");
+    return getFamilyStatus(userId);
   }
 
   async function verifyCurrentIdentity(userId, input) {
@@ -330,13 +438,19 @@ function createAuthService(options = {}) {
   return {
     close,
     getConfig,
+    getFamilyStatus,
     getSession,
     login,
     logout,
     register,
+    bindFamily,
+    createFamilyInvite,
     requestPasswordReset,
     requestSms,
     resetPassword,
+    updateProfile,
+    updateRole,
+    unbindFamily,
     verifyCurrentIdentity,
   };
 }
@@ -352,6 +466,12 @@ async function handleAuthRequest(service, req, res, pathname, helpers) {
     if ((pathname === "/api/auth/status" || pathname === "/api/auth/me") && req.method === "GET") {
       const session = service.getSession(token);
       sendJson(res, 200, { authenticated: Boolean(session), user: session?.user || null, config: service.getConfig() });
+      return;
+    }
+    if (pathname === "/api/auth/family/status" && req.method === "GET") {
+      const session = service.getSession(token);
+      if (!session) throw new AuthError(401, "not_authenticated", "请先登录。");
+      sendJson(res, 200, service.getFamilyStatus(session.user.id));
       return;
     }
     if (req.method !== "POST") throw new AuthError(405, "method_not_allowed", "请求方法不受支持。");
@@ -385,6 +505,36 @@ async function handleAuthRequest(service, req, res, pathname, helpers) {
     }
     if (pathname === "/api/auth/password-reset/confirm") {
       sendJson(res, 200, service.resetPassword(body));
+      return;
+    }
+    if (pathname === "/api/auth/role") {
+      const session = service.getSession(token);
+      if (!session) throw new AuthError(401, "not_authenticated", "请先登录。");
+      sendJson(res, 200, { user: service.updateRole(session.user.id, body) });
+      return;
+    }
+    if (pathname === "/api/auth/profile") {
+      const session = service.getSession(token);
+      if (!session) throw new AuthError(401, "not_authenticated", "请先登录。");
+      sendJson(res, 200, { user: service.updateProfile(session.user.id, body) });
+      return;
+    }
+    if (pathname === "/api/auth/family/invite") {
+      const session = service.getSession(token);
+      if (!session) throw new AuthError(401, "not_authenticated", "请先登录。");
+      sendJson(res, 201, service.createFamilyInvite(session.user.id));
+      return;
+    }
+    if (pathname === "/api/auth/family/bind") {
+      const session = service.getSession(token);
+      if (!session) throw new AuthError(401, "not_authenticated", "请先登录。");
+      sendJson(res, 200, service.bindFamily(session.user.id, body));
+      return;
+    }
+    if (pathname === "/api/auth/family/unbind") {
+      const session = service.getSession(token);
+      if (!session) throw new AuthError(401, "not_authenticated", "请先登录。");
+      sendJson(res, 200, service.unbindFamily(session.user.id, body));
       return;
     }
     if (pathname === "/api/auth/identity/verify") {
@@ -424,6 +574,7 @@ function migrate(database) {
       password_params TEXT NOT NULL,
       nickname TEXT NOT NULL,
       role TEXT NOT NULL CHECK (role IN ('elder', 'family')),
+      onboarding_completed INTEGER NOT NULL DEFAULT 0,
       identity_status TEXT NOT NULL DEFAULT 'unverified',
       identity_name_masked TEXT,
       identity_subject_hash TEXT,
@@ -459,7 +610,30 @@ function migrate(database) {
     );
     CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
     CREATE INDEX IF NOT EXISTS idx_sessions_expiry ON sessions(expires_at);
+    CREATE TABLE IF NOT EXISTS family_invites (
+      id TEXT PRIMARY KEY,
+      elder_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      code_hash TEXT NOT NULL UNIQUE,
+      expires_at INTEGER NOT NULL,
+      consumed_at INTEGER,
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_family_invites_elder ON family_invites(elder_user_id, created_at DESC);
+    CREATE TABLE IF NOT EXISTS family_relations (
+      id TEXT PRIMARY KEY,
+      elder_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      family_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      created_at INTEGER NOT NULL,
+      UNIQUE(elder_user_id, family_user_id),
+      CHECK(elder_user_id <> family_user_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_family_relations_elder ON family_relations(elder_user_id);
+    CREATE INDEX IF NOT EXISTS idx_family_relations_family ON family_relations(family_user_id);
   `);
+  const userColumns = database.prepare("PRAGMA table_info(users)").all();
+  if (!userColumns.some((column) => column.name === "onboarding_completed")) {
+    database.exec("ALTER TABLE users ADD COLUMN onboarding_completed INTEGER NOT NULL DEFAULT 0");
+  }
 }
 
 function createSmsProvider(environment, nodeEnv) {
@@ -468,6 +642,7 @@ function createSmsProvider(environment, nodeEnv) {
     return {
       name: "console",
       ready: true,
+      mode: "debug",
       async send({ phone, code, purpose }) {
         process.stdout.write(`[auth_dev_sms] ${phone} ${purpose} ${code}\n`);
       },
@@ -477,6 +652,7 @@ function createSmsProvider(environment, nodeEnv) {
     return {
       name: "webhook",
       ready: true,
+      mode: "live",
       async send(payload) {
         const response = await fetchWithTimeout(environment.SMS_WEBHOOK_URL, {
           method: "POST",
@@ -487,7 +663,7 @@ function createSmsProvider(environment, nodeEnv) {
       },
     };
   }
-  return { name: "disabled", ready: false, async send() { throw new Error("SMS provider is disabled"); } };
+  return { name: "disabled", ready: false, mode: "disabled", async send() { throw new Error("SMS provider is disabled"); } };
 }
 
 function createIdentityProvider(environment, nodeEnv) {
@@ -607,6 +783,7 @@ function toPublicUser(user) {
     phone: maskPhone(user.phone),
     nickname: user.nickname,
     role: user.role,
+    onboardingComplete: Boolean(user.onboarding_completed),
     identityStatus: user.identity_status,
     identityName: user.identity_name_masked || null,
     identityVerifiedAt: user.identity_verified_at || null,

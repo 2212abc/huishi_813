@@ -169,6 +169,7 @@ const DEFAULT_STATE = {
     name: "",
     phone: "",
     identityStatus: "unverified",
+    onboardingComplete: false,
   },
   ui: {
     fontSize: "standard",
@@ -190,6 +191,7 @@ const DEFAULT_STATE = {
     acceptedAt: null,
   },
   profile: {
+    nickname: "",
     age: "",
     sex: "female",
     height: "",
@@ -223,13 +225,20 @@ let speechPaused = false;
 let pendingVoiceMeal = null;
 let currentMealResult = null;
 let lastFocusedElement = null;
+let roleLastFocusedElement = null;
 let lastPhotoFile = null;
 let largestViewportHeight = window.visualViewport?.height || window.innerHeight;
 let serviceStatus = { photoAnalysis: false, textAnalysis: false, speechRecognition: "browser", checked: false };
-let authConfig = { smsReady: false, identityReady: false, identityRequired: false, checked: false };
+let authConfig = { smsReady: false, smsMode: "disabled", smsVerificationRequired: true, identityReady: false, identityRequired: false, checked: false };
 let authBusy = false;
 let authCodeCooldown = 0;
 let authCodeTimer = null;
+let roleBusy = false;
+let pendingRole = "elder";
+let lastSyncedNickname = "";
+let familyBinding = { loaded: false, linked: [], hasActiveInvite: false, inviteExpiresAt: null };
+let familyBindingBusy = false;
+let activeFamilyInvite = null;
 
 document.addEventListener("DOMContentLoaded", init);
 
@@ -368,6 +377,7 @@ function syncChoiceButtons() {
 
 function bindEvents() {
   $("#authForm").addEventListener("submit", handleAuthSubmit);
+  $("#authSubmit").addEventListener("click", handleAuthSubmit);
   $$("[data-auth-mode]").forEach((button) => {
     button.addEventListener("click", () => {
       setAuthMode(button.dataset.authMode);
@@ -375,21 +385,17 @@ function bindEvents() {
   });
   $("#forgotPassword").addEventListener("click", () => setAuthMode(state.auth.authMode === "reset" ? "login" : "reset"));
   $("#sendAuthCode").addEventListener("click", requestAuthCode);
-  $$(".role-card").forEach((card) => {
-    card.addEventListener("click", () => {
-      const input = card.querySelector("[name='authRole']");
-      if (!input) return;
-      state.auth.role = input.value;
-      renderAuth();
-      saveState();
-    });
+  $$("[data-session-role]").forEach((button) => {
+    button.addEventListener("click", () => selectPendingRole(button.dataset.sessionRole));
   });
-  $$("[name='authRole']").forEach((input) => {
-    input.addEventListener("change", () => {
-      state.auth.role = input.value;
-      renderAuth();
-      saveState();
-    });
+  $("#confirmRole").addEventListener("click", confirmRoleSelection);
+  $("#closeRoleModal").addEventListener("click", closeRoleModal);
+  $("#roleModal").addEventListener("click", (event) => {
+    if (event.target === $("#roleModal")) closeRoleModal();
+  });
+  $("#roleLogout").addEventListener("click", async () => {
+    closeRoleModal(false);
+    await handleLogout();
   });
   const clearLocalDataButton = $("#clearLocalData");
   if (clearLocalDataButton) clearLocalDataButton.addEventListener("click", clearLocalData);
@@ -398,7 +404,7 @@ function bindEvents() {
     setPrivacyConsent(privacyConsentButton.getAttribute("aria-checked") !== "true");
   });
 
-  $("#modeSwitch").addEventListener("click", handleLogout);
+  $("#modeSwitch").addEventListener("click", () => openRoleModal(state.auth.role));
 
   $$("[data-go]").forEach((button) => button.addEventListener("click", () => goToScreen(button.dataset.go)));
   $$(".bottom-nav button").forEach((button) => button.addEventListener("click", () => goToScreen(button.dataset.screen)));
@@ -460,11 +466,22 @@ function bindEvents() {
   $("#bindModal").addEventListener("click", (event) => {
     if (event.target === $("#bindModal")) closeBindModal();
   });
+  $("#bindSheet").addEventListener("click", handleBindModalClick);
+  $("#bindSheet").addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && event.target.matches("#familyBindCode")) {
+      event.preventDefault();
+      void submitFamilyBinding();
+    }
+  });
   $("#mealResultModal").addEventListener("click", (event) => {
     if (event.target === $("#mealResultModal")) closeMealResultModal();
   });
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape") return;
+    if (!$("#roleModal").hidden) {
+      closeRoleModal();
+      return;
+    }
     if (!$("#mealResultModal").hidden) closeMealResultModal();
     if (!$("#bindModal").hidden) closeBindModal();
   });
@@ -564,25 +581,18 @@ async function handleAuthSubmit(event) {
   try {
     if (mode === "login") {
       const result = await authApi("/api/auth/login", { phone, password });
-      completeAuthentication(result.user, false);
+      completeAuthentication(result.user, false, true);
       showToast("登录成功");
       return;
     }
     if (mode === "register") {
-      const role = new FormData($("#authForm")).get("authRole") === "family" ? "family" : "elder";
       const payload = {
         phone,
         code,
         password,
-        nickname: $("#authName").value.trim(),
-        role,
       };
-      if (authConfig.identityRequired) {
-        payload.realName = $("#authRealName").value.trim();
-        payload.idNumber = $("#authIdNumber").value.trim();
-      }
       const result = await authApi("/api/auth/register", payload);
-      completeAuthentication(result.user, true);
+      completeAuthentication(result.user, true, true);
       showToast("注册成功");
       return;
     }
@@ -603,17 +613,11 @@ function renderAuth() {
   const isAuthScreen = state.screen === "login" || !state.auth?.loggedIn;
   $(".app-shell").classList.toggle("is-auth-screen", isAuthScreen);
   const mode = ["login", "register", "reset"].includes(state.auth?.authMode) ? state.auth.authMode : "login";
-  const role = state.auth?.role === "family" ? "family" : "elder";
+  const needsSms = mode !== "login" && authConfig.smsVerificationRequired !== false;
   $$("[data-auth-mode]").forEach((button) => button.classList.toggle("is-active", button.dataset.authMode === mode));
   $$("[data-auth-register]").forEach((node) => { node.hidden = mode !== "register"; });
-  $$("[data-auth-code]").forEach((node) => { node.hidden = mode === "login"; });
+  $$("[data-auth-code]").forEach((node) => { node.hidden = !needsSms; });
   $$("[data-auth-new-password]").forEach((node) => { node.hidden = mode === "login"; });
-  const identityFields = $("#identityFields");
-  if (identityFields) identityFields.hidden = mode !== "register" || !authConfig.identityRequired;
-  $$("[name='authRole']").forEach((input) => {
-    input.checked = input.value === role;
-    input.closest(".role-card")?.classList.toggle("is-active", input.checked);
-  });
   const consent = $("#privacyConsent");
   if (consent) {
     const accepted = Boolean(state.privacy?.accepted);
@@ -622,9 +626,9 @@ function renderAuth() {
   }
   $("#loginTitle").textContent = mode === "register" ? "创建慧食账号" : mode === "reset" ? "找回密码" : "手机号登录";
   $("#loginIntro").textContent = mode === "register"
-    ? "验证手机号并设置密码，之后可在这台设备安全登录。"
+    ? needsSms ? "验证手机号并设置密码，之后可在这台设备安全登录。" : "测试期间直接使用手机号设置密码。"
     : mode === "reset"
-      ? "通过短信验证码设置新密码。"
+      ? needsSms ? "通过短信验证码设置新密码。" : "测试期间直接为已注册手机号设置新密码。"
       : "登录后继续使用语音记餐、拍照识别和健康提醒。";
   $("#authPasswordLabel").textContent = mode === "login" ? "密码" : "设置新密码";
   $("#authPassword").autocomplete = mode === "login" ? "current-password" : "new-password";
@@ -634,21 +638,26 @@ function renderAuth() {
   $("#forgotPassword").textContent = mode === "reset" ? "返回登录" : "忘记密码";
   $("#authHelper").textContent = mode === "login"
     ? "账号密码经过安全哈希处理，服务器不会保存明文密码。"
-    : mode === "register"
-      ? "短信验证码 5 分钟内有效；密码请勿使用连续或重复数字。"
-      : "更新密码后，其他设备上的登录会自动失效。";
+    : !needsSms
+      ? "当前为测试模式，无需短信验证码；密码请勿使用连续或重复数字。"
+      : mode === "register"
+        ? "短信验证码 5 分钟内有效；密码请勿使用连续或重复数字。"
+        : "更新密码后，其他设备上的登录会自动失效。";
   const serviceNotice = $("#authServiceNotice");
-  const identityUnavailable = mode === "register" && authConfig.identityRequired && !authConfig.identityReady;
   if (serviceNotice) {
-    serviceNotice.hidden = mode === "login" || (authConfig.checked && authConfig.smsReady && !identityUnavailable);
+    serviceNotice.hidden = mode === "login" || (authConfig.checked && needsSms && authConfig.smsReady && authConfig.smsMode !== "debug");
     serviceNotice.textContent = !authConfig.checked
       ? "正在检查账号服务…"
+      : !needsSms
+        ? "当前为测试模式：无需短信验证码，手机号会作为账号唯一标识。"
       : !authConfig.smsReady
         ? "短信服务正在配置，暂时不能注册或找回密码。"
-        : "实名认证服务正在配置，暂时不能完成注册。";
+        : authConfig.smsMode === "debug"
+          ? "当前是本地调试模式：验证码不会发送到手机，获取后会自动填入。"
+          : "验证码将发送到该手机号，5 分钟内有效。";
   }
   updateAuthCodeButton();
-  $("#authSubmit").disabled = authBusy || (mode !== "login" && authConfig.checked && !authConfig.smsReady) || identityUnavailable;
+  $("#authSubmit").disabled = authBusy || (needsSms && authConfig.checked && !authConfig.smsReady);
 }
 
 function setAuthMode(mode) {
@@ -674,7 +683,12 @@ async function requestAuthCode() {
       : { phone: $("#authPhone").value.trim(), purpose: "register" };
     const result = await authApi(endpoint, payload);
     startAuthCodeCooldown(Number(result.retryAfter || 60));
-    showToast("验证码已发送，请查看短信");
+    if (result.delivery === "debug" && result.debugCode) {
+      $("#authCode").value = result.debugCode;
+      showToast("本地调试验证码已自动填入");
+    } else {
+      showToast("验证码已发送，请查看短信");
+    }
   } catch (error) {
     setAuthError(error.message || "验证码发送失败，请稍后再试。");
   } finally {
@@ -730,8 +744,15 @@ async function authApi(pathname, body) {
   return data;
 }
 
-function completeAuthentication(user, acceptedPrivacy) {
+function completeAuthentication(user, acceptedPrivacy, promptForRole = false) {
   const role = user?.role === "family" ? "family" : "elder";
+  if (acceptedPrivacy) {
+    state.profile = structuredClone(DEFAULT_STATE.profile);
+    state.setupComplete = false;
+    state.mealHistory = [];
+    state.latestMealAlert = null;
+    state.latestMealRecord = null;
+  }
   state.auth = {
     ...state.auth,
     loggedIn: true,
@@ -740,7 +761,10 @@ function completeAuthentication(user, acceptedPrivacy) {
     name: user?.nickname || (role === "family" ? "家人" : "长辈"),
     phone: user?.phone || "",
     identityStatus: user?.identityStatus || "unverified",
+    onboardingComplete: Boolean(user?.onboardingComplete),
   };
+  state.profile.nickname = user?.nickname || "";
+  lastSyncedNickname = user?.nickname || "";
   if (acceptedPrivacy) state.privacy = { accepted: true, acceptedAt: new Date().toISOString() };
   state.mode = role;
   state.wizardOpen = false;
@@ -748,9 +772,67 @@ function completeAuthentication(user, acceptedPrivacy) {
   $("#authPassword").value = "";
   $("#authPasswordConfirm").value = "";
   $("#authCode").value = "";
+  $("#nicknameInput").value = state.profile.nickname;
   saveState();
   renderAll();
   goToScreen(state.screen, false);
+  familyBinding = { loaded: false, linked: [], hasActiveInvite: false, inviteExpiresAt: null };
+  activeFamilyInvite = null;
+  void refreshFamilyBindingStatus();
+  if (promptForRole) openRoleModal(role);
+}
+
+function openRoleModal(role = state.auth.role) {
+  if (!state.auth.loggedIn) return;
+  roleLastFocusedElement = document.activeElement;
+  pendingRole = role === "family" ? "family" : "elder";
+  $("#roleError").hidden = true;
+  $("#roleError").textContent = "";
+  $(".app-shell").inert = true;
+  $("#roleModal").hidden = false;
+  renderRoleSelection();
+  requestAnimationFrame(() => $("[data-session-role].is-active")?.focus());
+}
+
+function closeRoleModal(restoreFocus = true) {
+  $("#roleModal").hidden = true;
+  $(".app-shell").inert = false;
+  if (restoreFocus) roleLastFocusedElement?.focus({ preventScroll: true });
+  roleLastFocusedElement = null;
+}
+
+function selectPendingRole(role) {
+  if (roleBusy) return;
+  pendingRole = role === "family" ? "family" : "elder";
+  renderRoleSelection();
+}
+
+function renderRoleSelection() {
+  $$("[data-session-role]").forEach((button) => {
+    const selected = button.dataset.sessionRole === pendingRole;
+    button.classList.toggle("is-active", selected);
+    button.setAttribute("aria-checked", selected ? "true" : "false");
+  });
+  $("#confirmRole").disabled = roleBusy;
+  $("#confirmRole").textContent = roleBusy ? "正在保存…" : "确认身份";
+}
+
+async function confirmRoleSelection() {
+  if (roleBusy) return;
+  roleBusy = true;
+  renderRoleSelection();
+  try {
+    const result = await authApi("/api/auth/role", { role: pendingRole });
+    closeRoleModal(false);
+    completeAuthentication(result.user, false, false);
+    showToast(pendingRole === "family" ? "已进入家人端" : "已进入长辈端");
+  } catch (error) {
+    $("#roleError").textContent = error.message || "身份保存失败，请重试。";
+    $("#roleError").hidden = false;
+  } finally {
+    roleBusy = false;
+    renderRoleSelection();
+  }
 }
 
 async function refreshAuthSession() {
@@ -758,7 +840,7 @@ async function refreshAuthSession() {
     const result = await authApi("/api/auth/status");
     authConfig = { ...authConfig, ...(result.config || {}), checked: true };
     if (result.authenticated && result.user) {
-      completeAuthentication(result.user, false);
+      completeAuthentication(result.user, false, !result.user.onboardingComplete);
       return;
     }
   } catch {
@@ -776,6 +858,8 @@ async function handleLogout() {
   state.auth = { ...DEFAULT_STATE.auth, role: state.auth?.role === "family" ? "family" : "elder" };
   state.screen = "login";
   state.wizardOpen = false;
+  familyBinding = { loaded: false, linked: [], hasActiveInvite: false, inviteExpiresAt: null };
+  activeFamilyInvite = null;
   saveState();
   renderAll();
   goToScreen("login", false);
@@ -831,7 +915,7 @@ function renderPhotoAccessHint() {
 function renderMode() {
   const isFamily = state.mode === "family";
   $("#modeLabel").textContent = isFamily ? "家人端" : "长辈端";
-  $("#modeSwitch").textContent = "退出登录";
+  $("#modeSwitch").textContent = "切换身份";
 }
 
 function setMealMode(mode) {
@@ -1006,7 +1090,7 @@ function renderProfile() {
     ...state.profile.customGoals,
   ];
   const cards = [
-    { step: "basic", title: "基础信息", value: state.profile.age ? `${state.profile.age} 岁 · ${state.profile.sex === "male" ? "男" : "女"}` : "未填写", text: state.profile.height && state.profile.weight ? `${state.profile.height} cm / ${state.profile.weight} kg` : "请补充身高和体重", tone: "blue" },
+    { step: "basic", title: "基础信息", value: state.profile.nickname || "未填写姓名", text: state.profile.age ? `${state.profile.age} 岁 · ${state.profile.sex === "male" ? "男" : "女"} · ${state.profile.height || "--"} cm / ${state.profile.weight || "--"} kg` : "请补充姓名、年龄、身高和体重", tone: "blue" },
     { step: "activity", title: "活动时间", value: activity.name, text: activity.desc, tone: "green" },
     { step: "conditions", title: "慢病红线", value: conditionNames.length ? `${conditionNames.length} 项` : "未选择", text: conditionNames.join("、") || "补充高血压、糖尿病等", tone: "red" },
     { step: "allergy", title: "过敏黑名单", value: state.profile.allergies.length ? `${state.profile.allergies.length} 项` : "暂无", text: state.profile.allergies.join("、") || "可添加花生、虾等", tone: "yellow" },
@@ -1174,6 +1258,7 @@ function openWizard(index = 0) {
 
 function closeWizard() {
   updateProfileFromForm();
+  void syncAccountNickname();
   state.wizardOpen = false;
   state.setupComplete = true;
   saveState();
@@ -1209,7 +1294,9 @@ function previousStep() {
 
 function nextStep() {
   if (!validateStep()) return;
+  const completedStep = STEPS[state.wizardStep]?.id;
   updateProfileFromForm();
+  if (completedStep === "basic") void syncAccountNickname();
   if (state.wizardStep < STEPS.length - 1) {
     state.wizardStep += 1;
     renderWizard();
@@ -1221,9 +1308,11 @@ function nextStep() {
 
 function validateStep() {
   if (STEPS[state.wizardStep]?.id !== "basic") return true;
+  const nickname = $("#nicknameInput").value.trim();
   const age = Number($("#ageInput").value);
   const height = Number($("#heightInput").value);
   const weight = Number($("#weightInput").value);
+  if (!nickname) return showInvalid("请填写姓名或昵称", "#nicknameInput");
   if (age < 45 || age > 110) return showInvalid("请确认年龄是否正确", "#ageInput");
   if (height < 120 || height > 210) return showInvalid("请确认身高是否正确", "#heightInput");
   if (weight < 35 || weight > 130) return showInvalid("请确认体重是否正确", "#weightInput");
@@ -1237,6 +1326,7 @@ function showInvalid(text, selector) {
 }
 
 function syncForm() {
+  $("#nicknameInput").value = state.profile.nickname;
   $("#ageInput").value = state.profile.age;
   $("#sexInput").value = state.profile.sex;
   $("#heightInput").value = state.profile.height;
@@ -1251,6 +1341,7 @@ function syncForm() {
 }
 
 function updateProfileFromForm() {
+  state.profile.nickname = $("#nicknameInput").value.trim().replace(/\s+/g, " ").slice(0, 30);
   state.profile.age = Number($("#ageInput").value || state.profile.age);
   state.profile.sex = $("#sexInput").value;
   state.profile.height = Number($("#heightInput").value || state.profile.height);
@@ -1262,6 +1353,19 @@ function updateProfileFromForm() {
   state.profile.familyGuard = $("#guardInput").checked;
   renderShareCode();
   saveState();
+}
+
+async function syncAccountNickname() {
+  const nickname = state.profile.nickname.trim();
+  if (!state.auth.loggedIn || !nickname || nickname === lastSyncedNickname) return;
+  try {
+    const result = await authApi("/api/auth/profile", { nickname });
+    lastSyncedNickname = result.user?.nickname || nickname;
+    state.auth.name = lastSyncedNickname;
+    saveState();
+  } catch (error) {
+    showToast(error.message || "姓名保存到账号失败，请稍后重试");
+  }
 }
 
 function addAllergy() {
@@ -2823,14 +2927,17 @@ function renderFamily() {
   const unresolvedCount = todayRecords.filter((record) => record.level !== "green" && !record.handled).length;
   const latest = state.latestMealAlert || state.latestMealRecord || history.at(-1) || null;
   const profileLabel = state.profile.age ? `${state.profile.age} 岁` : "基础信息未完成";
+  const linkedAccount = familyBinding.linked?.[0] || null;
+  const linkedName = linkedAccount?.user?.nickname || linkedAccount?.user?.phone || "";
+  const bindingLabel = linkedAccount ? `已绑定 · ${linkedName}` : "尚未绑定账号";
 
   hero.innerHTML = `
     <div>
-      <span>本机家人视图</span>
+      <span>${escapeHtml(bindingLabel)}</span>
       <strong>健康档案 · ${escapeHtml(profileLabel)}</strong>
       <small>${latest ? `最近记录：${escapeHtml(latest.updated || "时间未知")}` : "尚无真实餐食记录"}</small>
     </div>
-    <div class="score-badge">本机</div>
+    <div class="score-badge">${linkedAccount ? "已绑定" : "本机"}</div>
   `;
   grid.innerHTML = `
     <div class="mini-card green"><span>今日记录</span><strong>${todayRecords.length} 餐</strong></div>
@@ -2926,11 +3033,13 @@ function scrollResultIntoView(selector) {
   }, 80);
 }
 
-function openBindModal() {
+async function openBindModal() {
   lastFocusedElement = document.activeElement;
   $(".app-shell").inert = true;
   $("#bindModal").hidden = false;
+  renderBindModal();
   $("#closeBindModal").focus();
+  await refreshFamilyBindingStatus();
 }
 
 function closeBindModal() {
@@ -2938,6 +3047,156 @@ function closeBindModal() {
   $(".app-shell").inert = false;
   lastFocusedElement?.focus({ preventScroll: true });
   lastFocusedElement = null;
+}
+
+async function refreshFamilyBindingStatus() {
+  if (!state.auth.loggedIn) return;
+  try {
+    const result = await authApi("/api/auth/family/status");
+    familyBinding = { ...result, loaded: true };
+    if (activeFamilyInvite && activeFamilyInvite.expiresAt <= Date.now()) activeFamilyInvite = null;
+  } catch (error) {
+    familyBinding = { loaded: true, linked: [], error: error.message || "绑定状态读取失败" };
+  }
+  renderFamily();
+  if (!$("#bindModal").hidden) renderBindModal();
+}
+
+function renderBindModal() {
+  const content = $("#bindContent");
+  if (!content) return;
+  if (!familyBinding.loaded) {
+    content.innerHTML = '<p class="eyebrow">家人绑定</p><h2 id="bindTitle">正在读取绑定状态</h2><p class="bind-hint">请稍候。</p>';
+    return;
+  }
+  if (familyBinding.error) {
+    content.innerHTML = `
+      <p class="eyebrow">家人绑定</p>
+      <h2 id="bindTitle">暂时无法读取</h2>
+      <p class="auth-error">${escapeHtml(familyBinding.error)}</p>
+      <button class="secondary-button bind-wide-button" type="button" data-bind-action="refresh">重新加载</button>
+    `;
+    return;
+  }
+  const isFamily = state.auth.role === "family";
+  const linkedMarkup = renderFamilyRelations(familyBinding.linked || []);
+  const inviteIsActive = activeFamilyInvite?.code && activeFamilyInvite.expiresAt > Date.now();
+  content.innerHTML = isFamily ? `
+    <p class="eyebrow">家人绑定</p>
+    <h2 id="bindTitle">绑定长辈账号</h2>
+    <p class="bind-hint">请向长辈获取 6 位绑定码。绑定关系会安全保存在账号数据库中。</p>
+    ${linkedMarkup}
+    <label class="bind-code-label" for="familyBindCode">6 位绑定码
+      <input id="familyBindCode" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="请输入绑定码" />
+    </label>
+    <p class="auth-error" id="bindError" role="alert" hidden></p>
+    <button class="primary-button bind-wide-button" type="button" data-bind-action="bind" ${familyBindingBusy ? "disabled" : ""}>${familyBindingBusy ? "正在绑定…" : "确认绑定"}</button>
+  ` : `
+    <p class="eyebrow">家人绑定</p>
+    <h2 id="bindTitle">邀请家人加入</h2>
+    <p class="bind-hint">绑定码 10 分钟内有效且只能使用一次。家人需登录自己的账号并切换到家人身份。</p>
+    ${linkedMarkup}
+    ${inviteIsActive ? `
+      <section class="bind-invite" aria-label="当前绑定码">
+        <span>当前绑定码</span>
+        <strong>${escapeHtml(activeFamilyInvite.code)}</strong>
+        <small>有效期至 ${escapeHtml(formatInviteTime(activeFamilyInvite.expiresAt))}</small>
+      </section>
+    ` : ""}
+    <p class="auth-error" id="bindError" role="alert" hidden></p>
+    <button class="primary-button bind-wide-button" type="button" data-bind-action="generate" ${familyBindingBusy ? "disabled" : ""}>${familyBindingBusy ? "正在生成…" : inviteIsActive ? "重新生成绑定码" : "生成绑定码"}</button>
+  `;
+}
+
+function renderFamilyRelations(relations) {
+  if (!relations.length) return '<p class="bind-empty">当前还没有绑定账号</p>';
+  return `
+    <section class="bind-relations" aria-label="已绑定账号">
+      <h3>已绑定账号</h3>
+      ${relations.map((relation) => `
+        <div class="bind-relation-row">
+          <div><strong>${escapeHtml(relation.user?.nickname || (relation.relationship === "elder" ? "长辈" : "家人"))}</strong><small>${escapeHtml(relation.user?.phone || "")}</small></div>
+          <button class="text-button" type="button" data-bind-action="unbind" data-relation-id="${escapeHtml(relation.id)}">解除</button>
+        </div>
+      `).join("")}
+    </section>
+  `;
+}
+
+function formatInviteTime(timestamp) {
+  return new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit" }).format(new Date(timestamp));
+}
+
+async function handleBindModalClick(event) {
+  const button = event.target.closest("[data-bind-action]");
+  if (!button || familyBindingBusy) return;
+  const action = button.dataset.bindAction;
+  if (action === "refresh") return refreshFamilyBindingStatus();
+  if (action === "generate") return generateFamilyInvite();
+  if (action === "bind") return submitFamilyBinding();
+  if (action === "unbind") return unbindFamilyRelation(button.dataset.relationId);
+}
+
+async function generateFamilyInvite() {
+  familyBindingBusy = true;
+  renderBindModal();
+  let errorMessage = "";
+  try {
+    activeFamilyInvite = await authApi("/api/auth/family/invite", {});
+    familyBinding = { ...familyBinding, hasActiveInvite: true, inviteExpiresAt: activeFamilyInvite.expiresAt };
+    renderBindModal();
+  } catch (error) {
+    errorMessage = error.message || "绑定码生成失败，请重试。";
+  } finally {
+    familyBindingBusy = false;
+    renderBindModal();
+    if (errorMessage) setBindError(errorMessage);
+  }
+}
+
+async function submitFamilyBinding() {
+  const code = $("#familyBindCode")?.value.trim() || "";
+  if (!/^\d{6}$/.test(code)) return setBindError("请输入 6 位绑定码。");
+  familyBindingBusy = true;
+  renderBindModal();
+  let errorMessage = "";
+  try {
+    familyBinding = { ...(await authApi("/api/auth/family/bind", { code })), loaded: true };
+    renderBindModal();
+    renderFamily();
+    showToast("家人账号绑定成功");
+  } catch (error) {
+    errorMessage = error.message || "绑定失败，请核对绑定码。";
+  } finally {
+    familyBindingBusy = false;
+    renderBindModal();
+    if (errorMessage) setBindError(errorMessage);
+  }
+}
+
+async function unbindFamilyRelation(relationId) {
+  if (!relationId || !window.confirm("确定解除这个家人绑定吗？")) return;
+  familyBindingBusy = true;
+  renderBindModal();
+  let errorMessage = "";
+  try {
+    familyBinding = { ...(await authApi("/api/auth/family/unbind", { relationId })), loaded: true };
+    renderFamily();
+    showToast("家人绑定已解除");
+  } catch (error) {
+    errorMessage = error.message || "解除绑定失败，请重试。";
+  } finally {
+    familyBindingBusy = false;
+    renderBindModal();
+    if (errorMessage) setBindError(errorMessage);
+  }
+}
+
+function setBindError(message) {
+  const error = $("#bindError");
+  if (!error) return;
+  error.textContent = message;
+  error.hidden = !message;
 }
 
 function renderCalendar() {
