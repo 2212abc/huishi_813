@@ -182,6 +182,51 @@ test("family invite codes create a persistent relation and are single-use", () =
   assert.equal(bound.linked[0].relationship, "elder");
   assert.equal(bound.linked[0].user.nickname, "张叔");
   assert.equal(service.getFamilyStatus(elder.id).linked[0].relationship, "family");
+
+  const cloudProfile = service.saveHealthProfile(elder.id, {
+    setupComplete: true,
+    profile: {
+      nickname: "张叔",
+      age: 72,
+      sex: "male",
+      height: 170,
+      weight: 66,
+      activity: "light",
+      conditions: ["hypertension"],
+      allergies: ["花生"],
+      goals: ["pressure"],
+      personal: "晚餐少盐",
+    },
+  });
+  assert.equal(cloudProfile.setupComplete, true);
+  assert.equal(cloudProfile.profile.age, 72);
+  service.saveMealRecord(elder.id, {
+    record: {
+      id: "meal-family-sync-1",
+      recordedAt: "2026-08-14T12:30:00.000Z",
+      dateKey: "2026-08-14",
+      mealPeriod: "dinner",
+      level: "red",
+      title: "先停一下",
+      message: "发现过敏黑名单。",
+      advice: "请让家人核对配料。",
+      source: "语音/文字记录",
+      foods: ["花生"],
+      handled: false,
+    },
+  });
+  const shared = service.getHealthData(family.id, elder.id);
+  assert.equal(shared.elder.nickname, "张叔");
+  assert.equal(shared.profile.conditions[0], "hypertension");
+  assert.equal(shared.meals.length, 1);
+  assert.equal(shared.meals[0].foods[0], "花生");
+  const unrelated = service.login({ phone: "13800138000", password: "new-meal-safe-2026" }).user;
+  assert.throws(
+    () => service.getHealthData(unrelated.id, elder.id),
+    (error) => error.code === "health_data_not_shared",
+  );
+  const handled = service.markMealHandled(family.id, { elderUserId: elder.id, recordId: "meal-family-sync-1" });
+  assert.equal(handled.record.handled, true);
   assert.throws(
     () => service.bindFamily(family.id, { code: invite.code }),
     (error) => error.code === "family_code_expired",
@@ -195,6 +240,10 @@ test("family invite codes create a persistent relation and are single-use", () =
   const unbound = service.unbindFamily(family.id, { relationId: bound.linked[0].id });
   assert.equal(unbound.linked.length, 0);
   assert.equal(service.getFamilyStatus(elder.id).linked.length, 0);
+  assert.throws(
+    () => service.getHealthData(family.id, elder.id),
+    (error) => error.code === "health_data_not_shared",
+  );
 });
 
 test("development mode can register and reset without SMS while keeping phone unique", async () => {

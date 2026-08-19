@@ -234,6 +234,134 @@ function createAuthService(options = {}) {
     return getPublicUser(userId);
   }
 
+  function getHealthData(viewerUserId, requestedElderUserId) {
+    const elderUserId = resolveHealthDataAccess(viewerUserId, requestedElderUserId);
+    const elder = database.prepare("SELECT id, nickname, phone FROM users WHERE id = ?").get(elderUserId);
+    const storedProfile = database.prepare(`
+      SELECT profile_json, setup_complete, version, updated_at
+      FROM health_profiles WHERE elder_user_id = ?
+    `).get(elderUserId);
+    const meals = database.prepare(`
+      SELECT * FROM meal_records
+      WHERE elder_user_id = ?
+      ORDER BY recorded_at ASC, created_at ASC
+      LIMIT 500
+    `).all(elderUserId).map(toPublicMealRecord);
+    return {
+      elder: {
+        id: elder.id,
+        nickname: elder.nickname,
+        phone: maskPhone(elder.phone),
+      },
+      profile: storedProfile ? parseStoredJson(storedProfile.profile_json, null) : null,
+      setupComplete: Boolean(storedProfile?.setup_complete),
+      profileVersion: Number(storedProfile?.version || 0),
+      profileUpdatedAt: storedProfile?.updated_at || null,
+      meals,
+    };
+  }
+
+  function saveHealthProfile(userId, input) {
+    const profile = sanitizeHealthProfile(input.profile);
+    const setupComplete = input.setupComplete ? 1 : 0;
+    const currentTime = now();
+    database.prepare(`
+      INSERT INTO health_profiles (elder_user_id, profile_json, setup_complete, version, updated_at)
+      VALUES (?, ?, ?, 1, ?)
+      ON CONFLICT(elder_user_id) DO UPDATE SET
+        profile_json = excluded.profile_json,
+        setup_complete = excluded.setup_complete,
+        version = health_profiles.version + 1,
+        updated_at = excluded.updated_at
+    `).run(userId, JSON.stringify(profile), setupComplete, currentTime);
+    return getHealthData(userId, userId);
+  }
+
+  function saveMealRecord(userId, input) {
+    const record = sanitizeMealRecord(input.record);
+    const currentTime = now();
+    database.prepare(`
+      INSERT INTO meal_records
+      (id, elder_user_id, recorded_at, date_key, meal_period, level, title, message,
+       advice, source, foods_json, handled, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        recorded_at = excluded.recorded_at,
+        date_key = excluded.date_key,
+        meal_period = excluded.meal_period,
+        level = excluded.level,
+        title = excluded.title,
+        message = excluded.message,
+        advice = excluded.advice,
+        source = excluded.source,
+        foods_json = excluded.foods_json,
+        handled = excluded.handled,
+        updated_at = excluded.updated_at
+      WHERE meal_records.elder_user_id = excluded.elder_user_id
+    `).run(
+      record.id,
+      userId,
+      record.recordedAt,
+      record.dateKey,
+      record.mealPeriod,
+      record.level,
+      record.title,
+      record.message,
+      record.advice,
+      record.source,
+      JSON.stringify(record.foods),
+      record.handled ? 1 : 0,
+      currentTime,
+      currentTime,
+    );
+    database.prepare(`
+      DELETE FROM meal_records
+      WHERE elder_user_id = ? AND id NOT IN (
+        SELECT id FROM meal_records WHERE elder_user_id = ?
+        ORDER BY recorded_at DESC, created_at DESC LIMIT 500
+      )
+    `).run(userId, userId);
+    return { record: getMealRecordForViewer(userId, userId, record.id) };
+  }
+
+  function importHealthData(userId, input) {
+    if (input.profile) saveHealthProfile(userId, input);
+    const records = Array.isArray(input.meals) ? input.meals.slice(-200) : [];
+    records.forEach((record) => saveMealRecord(userId, { record }));
+    return getHealthData(userId, userId);
+  }
+
+  function markMealHandled(viewerUserId, input) {
+    const elderUserId = resolveHealthDataAccess(viewerUserId, input.elderUserId);
+    const recordId = normalizeRecordId(input.recordId);
+    const result = database.prepare(`
+      UPDATE meal_records SET handled = 1, updated_at = ?
+      WHERE id = ? AND elder_user_id = ?
+    `).run(now(), recordId, elderUserId);
+    if (!result.changes) throw new AuthError(404, "meal_not_found", "没有找到这条餐食提醒。");
+    return { record: getMealRecordForViewer(viewerUserId, elderUserId, recordId) };
+  }
+
+  function resolveHealthDataAccess(viewerUserId, requestedElderUserId) {
+    const viewer = database.prepare("SELECT id FROM users WHERE id = ?").get(viewerUserId);
+    if (!viewer) throw new AuthError(401, "not_authenticated", "请先登录。");
+    const elderUserId = String(requestedElderUserId || viewerUserId).trim();
+    if (elderUserId === viewerUserId) return viewerUserId;
+    const relation = database.prepare(`
+      SELECT 1 FROM family_relations
+      WHERE elder_user_id = ? AND family_user_id = ?
+    `).get(elderUserId, viewerUserId);
+    if (!relation) throw new AuthError(403, "health_data_not_shared", "长辈尚未向当前账号共享健康数据。");
+    return elderUserId;
+  }
+
+  function getMealRecordForViewer(viewerUserId, elderUserId, recordId) {
+    resolveHealthDataAccess(viewerUserId, elderUserId);
+    const record = database.prepare("SELECT * FROM meal_records WHERE id = ? AND elder_user_id = ?").get(recordId, elderUserId);
+    if (!record) throw new AuthError(404, "meal_not_found", "没有找到这条餐食记录。");
+    return toPublicMealRecord(record);
+  }
+
   function getFamilyStatus(userId) {
     const user = database.prepare("SELECT id, role FROM users WHERE id = ?").get(userId);
     if (!user) throw new AuthError(401, "not_authenticated", "请先登录。");
@@ -439,6 +567,7 @@ function createAuthService(options = {}) {
     close,
     getConfig,
     getFamilyStatus,
+    getHealthData,
     getSession,
     login,
     logout,
@@ -448,6 +577,10 @@ function createAuthService(options = {}) {
     requestPasswordReset,
     requestSms,
     resetPassword,
+    importHealthData,
+    saveHealthProfile,
+    saveMealRecord,
+    markMealHandled,
     updateProfile,
     updateRole,
     unbindFamily,
@@ -474,9 +607,16 @@ async function handleAuthRequest(service, req, res, pathname, helpers) {
       sendJson(res, 200, service.getFamilyStatus(session.user.id));
       return;
     }
+    if (pathname === "/api/auth/health-data" && req.method === "GET") {
+      const session = service.getSession(token);
+      if (!session) throw new AuthError(401, "not_authenticated", "请先登录。");
+      const url = new URL(req.url || pathname, "http://localhost");
+      sendJson(res, 200, service.getHealthData(session.user.id, url.searchParams.get("elderUserId")));
+      return;
+    }
     if (req.method !== "POST") throw new AuthError(405, "method_not_allowed", "请求方法不受支持。");
     requireJsonRequest(req);
-    const body = await readJsonBody(req, 32 * 1024);
+    const body = await readJsonBody(req, pathname === "/api/auth/health-import" ? 512 * 1024 : 32 * 1024);
     if (pathname === "/api/auth/sms/request") {
       sendJson(res, 200, await service.requestSms({ ...body, ipAddress: context.ipAddress }));
       return;
@@ -517,6 +657,30 @@ async function handleAuthRequest(service, req, res, pathname, helpers) {
       const session = service.getSession(token);
       if (!session) throw new AuthError(401, "not_authenticated", "请先登录。");
       sendJson(res, 200, { user: service.updateProfile(session.user.id, body) });
+      return;
+    }
+    if (pathname === "/api/auth/health-profile") {
+      const session = service.getSession(token);
+      if (!session) throw new AuthError(401, "not_authenticated", "请先登录。");
+      sendJson(res, 200, service.saveHealthProfile(session.user.id, body));
+      return;
+    }
+    if (pathname === "/api/auth/health-import") {
+      const session = service.getSession(token);
+      if (!session) throw new AuthError(401, "not_authenticated", "请先登录。");
+      sendJson(res, 200, service.importHealthData(session.user.id, body));
+      return;
+    }
+    if (pathname === "/api/auth/meal-record") {
+      const session = service.getSession(token);
+      if (!session) throw new AuthError(401, "not_authenticated", "请先登录。");
+      sendJson(res, 201, service.saveMealRecord(session.user.id, body));
+      return;
+    }
+    if (pathname === "/api/auth/meal-handled") {
+      const session = service.getSession(token);
+      if (!session) throw new AuthError(401, "not_authenticated", "请先登录。");
+      sendJson(res, 200, service.markMealHandled(session.user.id, body));
       return;
     }
     if (pathname === "/api/auth/family/invite") {
@@ -629,6 +793,30 @@ function migrate(database) {
     );
     CREATE INDEX IF NOT EXISTS idx_family_relations_elder ON family_relations(elder_user_id);
     CREATE INDEX IF NOT EXISTS idx_family_relations_family ON family_relations(family_user_id);
+    CREATE TABLE IF NOT EXISTS health_profiles (
+      elder_user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      profile_json TEXT NOT NULL,
+      setup_complete INTEGER NOT NULL DEFAULT 0,
+      version INTEGER NOT NULL DEFAULT 1,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS meal_records (
+      id TEXT PRIMARY KEY,
+      elder_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      recorded_at TEXT NOT NULL,
+      date_key TEXT NOT NULL,
+      meal_period TEXT NOT NULL,
+      level TEXT NOT NULL,
+      title TEXT NOT NULL,
+      message TEXT NOT NULL,
+      advice TEXT NOT NULL,
+      source TEXT NOT NULL,
+      foods_json TEXT NOT NULL,
+      handled INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_meal_records_elder_time ON meal_records(elder_user_id, recorded_at DESC);
   `);
   const userColumns = database.prepare("PRAGMA table_info(users)").all();
   if (!userColumns.some((column) => column.name === "onboarding_completed")) {
@@ -750,6 +938,90 @@ function normalizeNickname(value) {
   const nickname = String(value || "").trim().replace(/\s+/g, " ").slice(0, 30);
   if (!nickname) throw new AuthError(400, "nickname_required", "请填写姓名或昵称。");
   return nickname;
+}
+
+function sanitizeHealthProfile(value) {
+  const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  const boundedNumber = (input, min, max) => {
+    if (input === "" || input == null) return "";
+    const number = Number(input);
+    return Number.isFinite(number) && number >= min && number <= max ? number : "";
+  };
+  const cleanList = (input, maximum = 20) => Array.from(new Set(
+    (Array.isArray(input) ? input : [])
+      .map((item) => String(item || "").trim().replace(/\s+/g, " ").slice(0, 40))
+      .filter(Boolean),
+  )).slice(0, maximum);
+  return {
+    nickname: String(source.nickname || "").trim().replace(/\s+/g, " ").slice(0, 30),
+    age: boundedNumber(source.age, 45, 110),
+    sex: ["female", "male", "other"].includes(source.sex) ? source.sex : "female",
+    height: boundedNumber(source.height, 120, 210),
+    weight: boundedNumber(source.weight, 35, 130),
+    activity: ["", "low", "light", "mid", "high"].includes(source.activity) ? source.activity : "",
+    conditions: cleanList(source.conditions, 12),
+    customConditions: cleanList(source.customConditions, 12),
+    allergies: cleanList(source.allergies, 30),
+    goals: cleanList(source.goals, 12),
+    customGoals: cleanList(source.customGoals, 12),
+    personal: String(source.personal || "").trim().replace(/\s+/g, " ").slice(0, 240),
+  };
+}
+
+function sanitizeMealRecord(value) {
+  const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  const recordedAt = String(source.recordedAt || "");
+  if (!Number.isFinite(Date.parse(recordedAt))) throw new AuthError(400, "invalid_meal_time", "餐食记录时间无效。");
+  const dateKey = /^\d{4}-\d{2}-\d{2}$/.test(String(source.dateKey || "")) ? String(source.dateKey) : null;
+  if (!dateKey) throw new AuthError(400, "invalid_meal_date", "餐食记录日期无效。");
+  const cleanText = (input, maximum) => String(input || "").trim().replace(/\s+/g, " ").slice(0, maximum);
+  return {
+    id: normalizeRecordId(source.id),
+    recordedAt: new Date(recordedAt).toISOString(),
+    dateKey,
+    mealPeriod: ["breakfast", "lunch", "dinner"].includes(source.mealPeriod) ? source.mealPeriod : "dinner",
+    level: ["red", "yellow", "green"].includes(source.level) ? source.level : "yellow",
+    title: cleanText(source.title, 120) || "饮食提醒",
+    message: cleanText(source.message, 800),
+    advice: cleanText(source.advice, 800),
+    source: cleanText(source.source, 80) || "餐食记录",
+    foods: Array.from(new Set((Array.isArray(source.foods) ? source.foods : [])
+      .map((item) => cleanText(item, 80))
+      .filter(Boolean))).slice(0, 20),
+    handled: Boolean(source.handled),
+  };
+}
+
+function normalizeRecordId(value) {
+  const id = String(value || "").trim();
+  if (!/^[A-Za-z0-9._:-]{1,100}$/.test(id)) throw new AuthError(400, "invalid_meal_id", "餐食记录编号无效。");
+  return id;
+}
+
+function toPublicMealRecord(record) {
+  const recordedAt = new Date(record.recorded_at);
+  return {
+    id: record.id,
+    recordedAt: recordedAt.toISOString(),
+    dateKey: record.date_key,
+    mealPeriod: record.meal_period,
+    level: record.level,
+    title: record.title,
+    message: record.message,
+    advice: record.advice,
+    source: record.source,
+    foods: parseStoredJson(record.foods_json, []),
+    handled: Boolean(record.handled),
+    updated: new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(recordedAt),
+  };
+}
+
+function parseStoredJson(value, fallback) {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
 }
 
 function normalizeRealName(value) {

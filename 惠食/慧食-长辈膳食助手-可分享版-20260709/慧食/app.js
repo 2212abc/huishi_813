@@ -164,6 +164,7 @@ const STEPS = [
 const DEFAULT_STATE = {
   auth: {
     loggedIn: false,
+    userId: "",
     authMode: "login",
     role: "elder",
     name: "",
@@ -239,6 +240,9 @@ let lastSyncedNickname = "";
 let familyBinding = { loaded: false, linked: [], hasActiveInvite: false, inviteExpiresAt: null };
 let familyBindingBusy = false;
 let activeFamilyInvite = null;
+let sharedHealthData = { loaded: false, elder: null, profile: null, setupComplete: false, meals: [], error: "" };
+let healthProfileSyncTimer = null;
+let healthDataHydrating = false;
 
 document.addEventListener("DOMContentLoaded", init);
 
@@ -744,18 +748,127 @@ async function authApi(pathname, body) {
   return data;
 }
 
+async function hydrateOwnHealthData() {
+  if (!state.auth.loggedIn || state.auth.role !== "elder" || healthDataHydrating) return;
+  healthDataHydrating = true;
+  try {
+    let cloud = await authApi("/api/auth/health-data");
+    if (!cloud.profile && (hasMeaningfulLocalHealthData() || state.mealHistory.length)) {
+      cloud = await authApi("/api/auth/health-import", {
+        profile: state.profile,
+        setupComplete: state.setupComplete,
+        meals: state.mealHistory,
+      });
+    }
+    applyOwnHealthData(cloud);
+  } catch (error) {
+    showToast(error.message || "云端健康数据读取失败，已保留本机副本");
+  } finally {
+    healthDataHydrating = false;
+  }
+}
+
+function applyOwnHealthData(cloud) {
+  if (!cloud || typeof cloud !== "object") return;
+  if (cloud.profile) {
+    const localFamilyGuard = Boolean(state.profile.familyGuard);
+    state.profile = { ...structuredClone(DEFAULT_STATE.profile), ...cloud.profile, familyGuard: localFamilyGuard };
+    state.setupComplete = Boolean(cloud.setupComplete);
+  }
+  if (Array.isArray(cloud.meals)) applyMealHistory(cloud.meals);
+  syncForm();
+  saveState();
+  renderAll();
+}
+
+function applyMealHistory(records) {
+  state.mealHistory = records.slice(-500);
+  state.latestMealRecord = state.mealHistory.at(-1) || null;
+  state.latestMealAlert = [...state.mealHistory].reverse().find((record) => record.level !== "green" && !record.handled) || null;
+}
+
+function hasMeaningfulLocalHealthData() {
+  const profile = state.profile || {};
+  return Boolean(
+    state.setupComplete
+    || profile.nickname
+    || profile.age
+    || profile.height
+    || profile.weight
+    || profile.activity
+    || profile.personal
+    || profile.conditions?.length
+    || profile.customConditions?.length
+    || profile.allergies?.length
+    || profile.goals?.length
+    || profile.customGoals?.length
+  );
+}
+
+function scheduleHealthProfileSync() {
+  if (!state.auth.loggedIn || state.auth.role !== "elder") return;
+  clearTimeout(healthProfileSyncTimer);
+  healthProfileSyncTimer = setTimeout(() => void syncHealthProfile(), 450);
+}
+
+async function syncHealthProfile() {
+  if (!state.auth.loggedIn || state.auth.role !== "elder") return;
+  try {
+    await authApi("/api/auth/health-profile", {
+      profile: state.profile,
+      setupComplete: state.setupComplete,
+    });
+  } catch (error) {
+    showToast(error.message || "档案已保存在本机，云端同步稍后重试");
+  }
+}
+
+async function syncMealRecord(record) {
+  if (!state.auth.loggedIn || state.auth.role !== "elder" || !record) return;
+  try {
+    await authApi("/api/auth/meal-record", { record });
+  } catch (error) {
+    showToast(error.message || "餐食已保存在本机，云端同步稍后重试");
+  }
+}
+
+async function refreshSharedHealthData() {
+  if (!state.auth.loggedIn || state.auth.role !== "family") return;
+  const relation = (familyBinding.linked || []).find((item) => item.relationship === "elder");
+  if (!relation?.user?.id) {
+    sharedHealthData = { loaded: true, elder: null, profile: null, setupComplete: false, meals: [], error: "" };
+    renderFamily();
+    return;
+  }
+  sharedHealthData = { loaded: false, elder: relation.user, profile: null, setupComplete: false, meals: [], error: "" };
+  renderFamily();
+  try {
+    const data = await authApi(`/api/auth/health-data?elderUserId=${encodeURIComponent(relation.user.id)}`);
+    sharedHealthData = { ...data, loaded: true, error: "" };
+  } catch (error) {
+    sharedHealthData = { loaded: true, elder: relation.user, profile: null, setupComplete: false, meals: [], error: error.message || "共享数据读取失败" };
+  }
+  renderFamily();
+  if (state.screen === "report") {
+    renderCalendar();
+    renderSelectedDayScore();
+  }
+}
+
 function completeAuthentication(user, acceptedPrivacy, promptForRole = false) {
   const role = user?.role === "family" ? "family" : "elder";
+  const previousUserId = state.auth?.userId || "";
+  const previousPhone = state.auth?.phone || "";
+  const sameKnownAccount = previousUserId === user?.id || (!previousUserId && previousPhone && previousPhone === user?.phone);
   if (acceptedPrivacy) {
-    state.profile = structuredClone(DEFAULT_STATE.profile);
-    state.setupComplete = false;
-    state.mealHistory = [];
-    state.latestMealAlert = null;
-    state.latestMealRecord = null;
+    resetLocalHealthData();
+  } else if (!sameKnownAccount) {
+    resetLocalHealthData();
   }
   state.auth = {
     ...state.auth,
     loggedIn: true,
+    userId: user?.id || "",
     authMode: "login",
     role,
     name: user?.nickname || (role === "family" ? "家人" : "长辈"),
@@ -777,9 +890,19 @@ function completeAuthentication(user, acceptedPrivacy, promptForRole = false) {
   renderAll();
   goToScreen(state.screen, false);
   familyBinding = { loaded: false, linked: [], hasActiveInvite: false, inviteExpiresAt: null };
+  sharedHealthData = { loaded: false, elder: null, profile: null, setupComplete: false, meals: [], error: "" };
   activeFamilyInvite = null;
   void refreshFamilyBindingStatus();
+  if (role === "elder") void hydrateOwnHealthData();
   if (promptForRole) openRoleModal(role);
+}
+
+function resetLocalHealthData() {
+  state.profile = structuredClone(DEFAULT_STATE.profile);
+  state.setupComplete = false;
+  state.mealHistory = [];
+  state.latestMealAlert = null;
+  state.latestMealRecord = null;
 }
 
 function openRoleModal(role = state.auth.role) {
@@ -859,6 +982,7 @@ async function handleLogout() {
   state.screen = "login";
   state.wizardOpen = false;
   familyBinding = { loaded: false, linked: [], hasActiveInvite: false, inviteExpiresAt: null };
+  sharedHealthData = { loaded: false, elder: null, profile: null, setupComplete: false, meals: [], error: "" };
   activeFamilyInvite = null;
   saveState();
   renderAll();
@@ -1262,6 +1386,7 @@ function closeWizard() {
   state.wizardOpen = false;
   state.setupComplete = true;
   saveState();
+  scheduleHealthProfileSync();
   renderAll();
   showToast("健康档案已保存");
 }
@@ -1353,6 +1478,7 @@ function updateProfileFromForm() {
   state.profile.familyGuard = $("#guardInput").checked;
   renderShareCode();
   saveState();
+  scheduleHealthProfileSync();
 }
 
 async function syncAccountNickname() {
@@ -1380,6 +1506,7 @@ function addAllergy() {
   input.value = "";
   renderAllergies();
   saveState();
+  scheduleHealthProfileSync();
   showToast("已加入过敏黑名单");
 }
 
@@ -1403,6 +1530,7 @@ function addCustomItem(selector, key, render, message) {
   input.value = "";
   render();
   saveState();
+  scheduleHealthProfileSync();
   showToast(message);
 }
 
@@ -1428,6 +1556,7 @@ function renderChipList(selector, items, type) {
       state.profile[key] = state.profile[key].filter((item) => item !== button.dataset[`remove${capitalize(type)}`]);
       renderChipList(selector, state.profile[key], type);
       saveState();
+      scheduleHealthProfileSync();
     });
   });
 }
@@ -1445,14 +1574,15 @@ function renderAllergies() {
       state.profile.allergies = state.profile.allergies.filter((item) => item !== button.dataset.removeAllergy);
       renderAllergies();
       saveState();
+      scheduleHealthProfileSync();
     });
   });
 }
 
 function renderShareCode() {
   $("#shareCode").textContent = state.profile.familyGuard
-    ? "本机家人视图已开启；当前试用不生成绑定码，也不会跨设备同步。"
-    : "当前试用不提供跨设备家庭绑定。";
+    ? "本机家人视图已开启；跨设备共享请在“家人绑定”中生成一次性绑定码。"
+    : "需要家人在另一台手机查看时，请使用“家人绑定”完成跨设备共享。";
 }
 
 function calculateBmi() {
@@ -2912,6 +3042,7 @@ function recordMealAlert(evaluation, items, source) {
   renderHomeTimeline();
   renderFamily();
   saveState();
+  void syncMealRecord(record);
 }
 
 function renderFamily() {
@@ -2919,15 +3050,32 @@ function renderFamily() {
   const grid = $("#familyGrid");
   const monitor = $("#familyMonitor");
   if (!hero || !grid || !monitor) return;
-  const history = Array.isArray(state.mealHistory) ? state.mealHistory : [];
+  const isRemoteFamilyView = state.auth.role === "family";
+  const linkedAccount = isRemoteFamilyView
+    ? (familyBinding.linked || []).find((item) => item.relationship === "elder")
+    : familyBinding.linked?.[0] || null;
+  if (isRemoteFamilyView && linkedAccount && !sharedHealthData.loaded) {
+    hero.innerHTML = `<div><span>已绑定 · ${escapeHtml(linkedAccount.user?.nickname || linkedAccount.user?.phone || "长辈")}</span><strong>正在同步健康档案</strong><small>请稍候，正在读取长辈设备上传的记录。</small></div><div class="score-badge">同步中</div>`;
+    grid.innerHTML = '<div class="mini-card green"><span>今日记录</span><strong>--</strong></div><div class="mini-card red"><span>红色警告</span><strong>--</strong></div><div class="mini-card yellow"><span>黄色提醒</span><strong>--</strong></div><div class="mini-card blue"><span>待查看</span><strong>--</strong></div>';
+    monitor.innerHTML = '<div class="monitor-empty"><strong>正在读取云端记录</strong><span>完成后会自动显示，无需重复绑定。</span></div>';
+    return;
+  }
+  if (isRemoteFamilyView && linkedAccount && sharedHealthData.error) {
+    hero.innerHTML = `<div><span>已绑定 · ${escapeHtml(linkedAccount.user?.nickname || linkedAccount.user?.phone || "长辈")}</span><strong>共享数据暂时无法读取</strong><small>${escapeHtml(sharedHealthData.error)}</small></div><div class="score-badge">未同步</div>`;
+    grid.innerHTML = '<div class="mini-card green"><span>今日记录</span><strong>--</strong></div><div class="mini-card red"><span>红色警告</span><strong>--</strong></div><div class="mini-card yellow"><span>黄色提醒</span><strong>--</strong></div><div class="mini-card blue"><span>待查看</span><strong>--</strong></div>';
+    monitor.innerHTML = '<div class="monitor-empty"><strong>请检查网络后重试</strong><span>绑定关系仍然保留，不需要重新绑定。</span></div><button class="secondary-button trend-button" type="button" data-family-action="refresh">重新同步</button>';
+    bindFamilyMonitorEvents(monitor);
+    return;
+  }
+  const profile = isRemoteFamilyView && sharedHealthData.profile ? sharedHealthData.profile : state.profile;
+  const history = getActiveMealHistory();
   const todayKey = formatLocalDateKey(new Date());
   const todayRecords = history.filter((record) => record?.dateKey === todayKey);
   const redCount = todayRecords.filter((record) => record.level === "red").length;
   const yellowCount = todayRecords.filter((record) => record.level === "yellow").length;
   const unresolvedCount = todayRecords.filter((record) => record.level !== "green" && !record.handled).length;
-  const latest = state.latestMealAlert || state.latestMealRecord || history.at(-1) || null;
-  const profileLabel = state.profile.age ? `${state.profile.age} 岁` : "基础信息未完成";
-  const linkedAccount = familyBinding.linked?.[0] || null;
+  const latest = [...history].reverse().find((record) => record.level !== "green" && !record.handled) || history.at(-1) || null;
+  const profileLabel = profile.age ? `${profile.age} 岁` : "基础信息未完成";
   const linkedName = linkedAccount?.user?.nickname || linkedAccount?.user?.phone || "";
   const bindingLabel = linkedAccount ? `已绑定 · ${linkedName}` : "尚未绑定账号";
 
@@ -2937,7 +3085,7 @@ function renderFamily() {
       <strong>健康档案 · ${escapeHtml(profileLabel)}</strong>
       <small>${latest ? `最近记录：${escapeHtml(latest.updated || "时间未知")}` : "尚无真实餐食记录"}</small>
     </div>
-    <div class="score-badge">${linkedAccount ? "已绑定" : "本机"}</div>
+    <div class="score-badge">${isRemoteFamilyView && linkedAccount ? "云端" : linkedAccount ? "已绑定" : "本机"}</div>
   `;
   grid.innerHTML = `
     <div class="mini-card green"><span>今日记录</span><strong>${todayRecords.length} 餐</strong></div>
@@ -2947,10 +3095,10 @@ function renderFamily() {
   `;
   if (!latest) {
     monitor.innerHTML = `
-      <div class="section-title"><h3>真实记录</h3><span>仅限本机</span></div>
+      <div class="section-title"><h3>真实记录</h3><span>${isRemoteFamilyView && linkedAccount ? "云端已同步" : "云端保存"}</span></div>
       <div class="monitor-empty">
         <strong>还没有餐食记录</strong>
-        <span>在“问一问”或“拍一拍”完成一次确认后，这里才会出现数据。</span>
+        <span>${isRemoteFamilyView && linkedAccount ? "长辈在自己的账号完成一次饮食确认后，这里会自动出现。" : "在“问一问”或“拍一拍”完成一次确认后，这里才会出现数据。"}</span>
       </div>
       <button class="secondary-button trend-button" type="button" data-family-action="report">查看记录日历</button>
     `;
@@ -2971,7 +3119,7 @@ function renderFamily() {
       <span>${escapeHtml(latest.advice || "请结合实际食物和医生建议核对。")}</span>
     </div>
     <div class="family-actions">
-      ${latest.level !== "green" && !latest.handled ? '<button class="secondary-button action-done" type="button" data-family-action="done">标记本机已查看</button>' : ""}
+      ${latest.level !== "green" && !latest.handled ? '<button class="secondary-button action-done" type="button" data-family-action="done">标记已查看</button>' : ""}
     </div>
     <button class="secondary-button trend-button" type="button" data-family-action="report">查看记录日历</button>
   `;
@@ -2983,14 +3131,15 @@ function bindFamilyMonitorEvents(monitor) {
     button.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
-      handleFamilyAction(button.dataset.familyAction);
+      void handleFamilyAction(button.dataset.familyAction);
     });
   });
 }
 
-function handleFamilyAction(action) {
+async function handleFamilyAction(action) {
+  if (action === "refresh") return refreshSharedHealthData();
   if (action === "report") {
-    const latestRecord = [...(Array.isArray(state.mealHistory) ? state.mealHistory : [])]
+    const latestRecord = [...getActiveMealHistory()]
       .reverse()
       .find((record) => /^\d{4}-\d{2}-\d{2}$/.test(record?.dateKey || ""));
     const targetDateKey = latestRecord?.dateKey || formatLocalDateKey(new Date());
@@ -3004,18 +3153,36 @@ function handleFamilyAction(action) {
   }
   if (action === "call" || action === "meal") return showToast("当前本机试用尚未启用跨设备联系或推送");
   if (action === "profile") {
-    openFamilyProfileWizard();
+    if (state.auth.role === "family") showToast("为避免误改，请让长辈在自己的账号中完善档案");
+    else openFamilyProfileWizard();
     return;
   }
   if (action === "done") {
-    if (!state.latestMealAlert) return showToast("当前没有待查看提醒");
-    const alertId = state.latestMealAlert.id;
-    state.latestMealAlert = { ...state.latestMealAlert, handled: true };
-    state.mealHistory = state.mealHistory.map((record) => record.id === alertId ? { ...record, handled: true } : record);
-    renderFamily();
-    saveState();
-    showToast("已在本机标记为已查看");
+    const activeAlert = [...getActiveMealHistory()].reverse().find((record) => record.level !== "green" && !record.handled);
+    if (!activeAlert) return showToast("当前没有待查看提醒");
+    try {
+      const elderUserId = state.auth.role === "family" ? sharedHealthData.elder?.id : state.auth.userId;
+      await authApi("/api/auth/meal-handled", { recordId: activeAlert.id, elderUserId });
+      if (state.auth.role === "family") {
+        sharedHealthData.meals = sharedHealthData.meals.map((record) => record.id === activeAlert.id ? { ...record, handled: true } : record);
+      } else {
+        state.latestMealAlert = { ...activeAlert, handled: true };
+        state.mealHistory = state.mealHistory.map((record) => record.id === activeAlert.id ? { ...record, handled: true } : record);
+        saveState();
+      }
+      renderFamily();
+      showToast("已同步标记为已查看");
+    } catch (error) {
+      showToast(error.message || "标记失败，请检查网络后重试");
+    }
   }
+}
+
+function getActiveMealHistory() {
+  if (state.auth.role === "family" && sharedHealthData.loaded) {
+    return Array.isArray(sharedHealthData.meals) ? sharedHealthData.meals : [];
+  }
+  return Array.isArray(state.mealHistory) ? state.mealHistory : [];
 }
 
 function openFamilyProfileWizard() {
@@ -3055,6 +3222,7 @@ async function refreshFamilyBindingStatus() {
     const result = await authApi("/api/auth/family/status");
     familyBinding = { ...result, loaded: true };
     if (activeFamilyInvite && activeFamilyInvite.expiresAt <= Date.now()) activeFamilyInvite = null;
+    if (state.auth.role === "family") await refreshSharedHealthData();
   } catch (error) {
     familyBinding = { loaded: true, linked: [], error: error.message || "绑定状态读取失败" };
   }
@@ -3162,6 +3330,7 @@ async function submitFamilyBinding() {
   let errorMessage = "";
   try {
     familyBinding = { ...(await authApi("/api/auth/family/bind", { code })), loaded: true };
+    await refreshSharedHealthData();
     renderBindModal();
     renderFamily();
     showToast("家人账号绑定成功");
@@ -3181,6 +3350,7 @@ async function unbindFamilyRelation(relationId) {
   let errorMessage = "";
   try {
     familyBinding = { ...(await authApi("/api/auth/family/unbind", { relationId })), loaded: true };
+    sharedHealthData = { loaded: true, elder: null, profile: null, setupComplete: false, meals: [], error: "" };
     renderFamily();
     showToast("家人绑定已解除");
   } catch (error) {
@@ -3249,7 +3419,7 @@ function getDayScore(day) {
   const year = Number(state.reportYear || TODAY.getFullYear());
   const month = Number.isInteger(state.reportMonth) ? state.reportMonth : TODAY.getMonth();
   const dateKey = formatLocalDateKey(new Date(year, month, day));
-  const records = (Array.isArray(state.mealHistory) ? state.mealHistory : []).filter((record) => record?.dateKey === dateKey);
+  const records = getActiveMealHistory().filter((record) => record?.dateKey === dateKey);
   const red = records.filter((record) => record.level === "red").length;
   const yellow = records.filter((record) => record.level === "yellow").length;
   const note = !records.length
