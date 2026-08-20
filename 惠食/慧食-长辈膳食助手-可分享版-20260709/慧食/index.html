@@ -3,9 +3,9 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="theme-color" content="#f7f7f8" />
+    <meta name="theme-color" content="#f7f3ec" />
     <title>慧食·长辈膳食助手</title>
-    <link rel="stylesheet" href="./styles.css?v=20260819e" />
+    <link rel="stylesheet" href="./styles.css?v=20260819f" />
   </head>
   <body>
     <a class="skip-link" href="#main">跳到主要内容</a>
@@ -93,8 +93,8 @@
               <span>我已了解：账号信息会安全存储在慧食服务器；只有主动使用语音、文字、照片分析或实名认证时，对应数据才会发送给已配置的服务商。</span>
             </button>
             <p class="legal-links" data-auth-register hidden>
-              注册即表示已阅读 <a href="/privacy.html" target="_blank" rel="noopener">隐私政策</a>
-              和 <a href="/terms.html" target="_blank" rel="noopener">用户协议</a>。
+              注册前请阅读 <a href="/privacy.html" data-legal-document="privacy">隐私政策</a>
+              和 <a href="/terms.html" data-legal-document="terms">用户协议</a>。
             </p>
             <button class="primary-button auth-submit" id="authSubmit" type="submit">登录</button>
             <button class="auth-forgot" id="forgotPassword" type="button">忘记密码</button>
@@ -250,10 +250,10 @@
               <strong id="recordLabel">点一下，开口说</strong>
               <small id="recordHint">比如：“这碗热干面我能吃吗？”</small>
             </div>
-            <p class="voice-mode-hint" id="voiceModeHint">没听清可以打字，或改一改。</p>
-            <label class="sr-label" for="voiceText">输入饭菜</label>
-            <textarea id="voiceText" rows="4" placeholder="这碗热干面我能吃吗？"></textarea>
-            <button class="primary-button" id="voiceAnalyze" type="button">帮我看看</button>
+            <p class="voice-mode-hint" id="voiceModeHint">没听清可以直接修改下面的文字。</p>
+            <label class="voice-text-label" for="voiceText">饭菜和重量</label>
+            <textarea id="voiceText" rows="4" placeholder="例如：红烧鱼 1斤"></textarea>
+            <button class="primary-button" id="voiceAnalyze" type="button">按这段文字分析</button>
           </section>
           <section class="meal-confirm-card" id="voiceConfirm" hidden aria-live="polite"></section>
           <section class="result-stack" id="voiceResult" aria-live="polite"></section>
@@ -391,12 +391,26 @@
         <h2 id="legalModalTitle">请确认最新协议</h2>
         <p class="role-modal-intro">惠食会在服务器保存账号、健康档案、餐食记录和家人授权。语音、文字或照片只在你主动使用对应功能时处理。</p>
         <div class="legal-document-links">
-          <a class="secondary-button" href="/privacy.html" target="_blank" rel="noopener">查看隐私政策</a>
-          <a class="secondary-button" href="/terms.html" target="_blank" rel="noopener">查看用户协议</a>
+          <a class="secondary-button" href="/privacy.html" data-legal-document="privacy">查看隐私政策</a>
+          <a class="secondary-button" href="/terms.html" data-legal-document="terms">查看用户协议</a>
         </div>
         <p class="auth-error" id="legalError" role="alert" hidden></p>
         <button class="primary-button" id="confirmLegalConsent" type="button">同意并继续</button>
         <button class="text-button" id="legalLogout" type="button">不同意，退出账号</button>
+      </div>
+    </div>
+    <div class="role-modal legal-reader-modal" id="legalDocumentModal" hidden role="dialog" aria-modal="true" aria-labelledby="legalDocumentTitle">
+      <div class="role-sheet legal-reader-sheet">
+        <button class="modal-close" id="closeLegalDocumentModal" type="button" aria-label="关闭协议阅读"><svg><use href="#i-close"></use></svg></button>
+        <p class="eyebrow">隐私与权利</p>
+        <h2 id="legalDocumentTitle">惠食隐私政策</h2>
+        <div class="legal-reader-tabs" role="tablist" aria-label="选择要阅读的文件">
+          <button class="is-active" type="button" role="tab" data-legal-document="privacy" aria-selected="true">隐私政策</button>
+          <button type="button" role="tab" data-legal-document="terms" aria-selected="false">用户协议</button>
+        </div>
+        <article class="legal-reader-content" id="legalDocumentContent" tabindex="0" aria-live="polite">
+          <p>正在加载…</p>
+        </article>
       </div>
     </div>
     <div class="role-modal" id="accountDataModal" hidden role="dialog" aria-modal="true" aria-labelledby="accountDataTitle">
@@ -419,6 +433,6 @@
       </div>
     </div>
     <div class="toast" id="toast" hidden role="status" aria-live="polite"></div>
-    <script src="./app.js?v=20260819e"></script>
+    <script src="./app.js?v=20260819f"></script>
   </body>
 </html>

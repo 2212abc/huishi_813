@@ -3,11 +3,7 @@ const TODAY = new Date();
 const PRIVACY_POLICY_VERSION = "2026-08-19";
 const TERMS_VERSION = "2026-08-19";
 const COMMON_CONDITION_IDS = ["hypertension", "diabetes", "fat", "gout", "kidney", "chewing"];
-const PORTION_OPTIONS = [
-  { id: "small", label: "小份", factor: 0.7 },
-  { id: "medium", label: "中份", factor: 1 },
-  { id: "large", label: "大份", factor: 1.4 },
-];
+const PORTION_UNIT_OPTIONS = ["份", "克", "两", "斤", "碗", "个", "杯"];
 
 const CONDITIONS = [
   { id: "hypertension", name: "高血压", rule: "一天盐少于 5 克", food: ["咸菜", "火锅", "热干面", "方便面", "牛肉面", "烧烤", "腊肉香肠"] },
@@ -267,6 +263,9 @@ let familyBinding = { loaded: false, linked: [], hasActiveInvite: false, inviteE
 let familyBindingBusy = false;
 let legalBusy = false;
 let pendingRolePromptAfterLegal = false;
+let legalDocumentParentModal = null;
+let legalDocumentReturnFocus = null;
+let legalDocumentRequestId = 0;
 let accountDataBusy = false;
 let activeFamilyInvite = null;
 let sharedHealthData = { loaded: false, elder: null, profile: null, setupComplete: false, meals: [], permissions: null, error: "" };
@@ -454,6 +453,17 @@ function bindEvents() {
     closeLegalModal(false);
     await handleLogout();
   });
+  $("#closeLegalDocumentModal")?.addEventListener("click", closeLegalDocument);
+  $("#legalDocumentModal")?.addEventListener("click", (event) => {
+    if (event.target === $("#legalDocumentModal")) closeLegalDocument();
+  });
+  $$("[data-legal-document]").forEach((control) => {
+    control.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void openLegalDocument(control.dataset.legalDocument);
+    });
+  });
   $("#closeAccountDataModal")?.addEventListener("click", closeAccountDataModal);
   $("#accountDataModal")?.addEventListener("click", (event) => {
     if (event.target === $("#accountDataModal")) closeAccountDataModal();
@@ -536,6 +546,10 @@ function bindEvents() {
   });
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape") return;
+    if (!$("#legalDocumentModal")?.hidden) {
+      closeLegalDocument();
+      return;
+    }
     if (!$("#accountDataModal")?.hidden) {
       closeAccountDataModal();
       return;
@@ -548,8 +562,14 @@ function bindEvents() {
     if (!$("#bindModal").hidden) closeBindModal();
   });
   document.addEventListener("click", (event) => {
-    const portionSelect = event.target.closest("[data-portion-select]");
-    if (portionSelect) return;
+    const legalDocument = event.target.closest("[data-legal-document]");
+    if (legalDocument) {
+      event.preventDefault();
+      void openLegalDocument(legalDocument.dataset.legalDocument);
+      return;
+    }
+    const portionControl = event.target.closest("[data-portion-value], [data-portion-unit]");
+    if (portionControl) return;
     const removeFood = event.target.closest("[data-remove-pending-food]");
     if (removeFood) {
       removePendingFood(removeFood.dataset.removePendingFood);
@@ -576,6 +596,15 @@ function bindEvents() {
       requestAnimationFrame(() => $("#voiceText")?.focus());
       return;
     }
+    const focusVoiceText = event.target.closest("[data-focus-voice-text]");
+    if (focusVoiceText) {
+      goToScreen("voice");
+      requestAnimationFrame(() => {
+        $("#voiceText")?.focus();
+        $("#voiceText")?.select();
+      });
+      return;
+    }
     const modalAction = event.target.closest("[data-meal-result-action]");
     if (modalAction) {
       handleMealResultAction(modalAction.dataset.mealResultAction);
@@ -588,10 +617,6 @@ function bindEvents() {
   });
   $("#prevMonth").addEventListener("click", () => changeMonth(-1));
   $("#nextMonth").addEventListener("click", () => changeMonth(1));
-  document.addEventListener("change", (event) => {
-    const select = event.target.closest("[data-portion-select]");
-    if (select) updatePendingPortion(select.dataset.portionSelect, select.value);
-  });
   document.addEventListener("focusin", (event) => {
     if (event.target.matches("input, textarea, select")) hideToast();
   });
@@ -1103,6 +1128,70 @@ function closeLegalModal(restoreApp = true) {
   if (restoreApp) $(".app-shell").inert = false;
 }
 
+async function openLegalDocument(kind) {
+  const documents = {
+    privacy: { title: "惠食隐私政策", path: "/privacy.html" },
+    terms: { title: "惠食用户协议", path: "/terms.html" },
+  };
+  const selectedKind = documents[kind] ? kind : "privacy";
+  const selected = documents[selectedKind];
+  const modal = $("#legalDocumentModal");
+  if (!modal) return;
+
+  if (modal.hidden) {
+    legalDocumentReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    legalDocumentParentModal = [$("#legalModal"), $("#accountDataModal")]
+      .find((candidate) => candidate && !candidate.hidden) || null;
+    if (legalDocumentParentModal) legalDocumentParentModal.inert = true;
+    else $(".app-shell").inert = true;
+    modal.hidden = false;
+    requestAnimationFrame(() => $("#closeLegalDocumentModal")?.focus());
+  }
+
+  $("#legalDocumentTitle").textContent = selected.title;
+  $$("[data-legal-document][role='tab']").forEach((button) => {
+    const active = button.dataset.legalDocument === selectedKind;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-selected", active ? "true" : "false");
+  });
+  const content = $("#legalDocumentContent");
+  content.innerHTML = "<p>正在加载…</p>";
+  content.scrollTop = 0;
+  const requestId = ++legalDocumentRequestId;
+
+  try {
+    const response = await fetch(selected.path, { headers: { Accept: "text/html" } });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const parsed = new DOMParser().parseFromString(await response.text(), "text/html");
+    const source = parsed.querySelector("main");
+    if (!source) throw new Error("missing legal document");
+    source.querySelectorAll("script, iframe, object, embed").forEach((element) => element.remove());
+    source.querySelector("h1")?.remove();
+    const firstParagraph = source.querySelector(":scope > p:first-child");
+    if (firstParagraph?.textContent.includes("返回惠食")) firstParagraph.remove();
+    if (requestId !== legalDocumentRequestId) return;
+    content.replaceChildren(...Array.from(source.childNodes, (node) => document.importNode(node, true)));
+  } catch {
+    if (requestId !== legalDocumentRequestId) return;
+    content.innerHTML = `
+      <p class="legal-reader-error">协议正文暂时加载失败。</p>
+      <a class="primary-button legal-reader-fallback" href="${selected.path}" target="_self">在当前页面打开</a>
+    `;
+  }
+}
+
+function closeLegalDocument() {
+  const modal = $("#legalDocumentModal");
+  if (!modal || modal.hidden) return;
+  legalDocumentRequestId += 1;
+  modal.hidden = true;
+  if (legalDocumentParentModal) legalDocumentParentModal.inert = false;
+  else $(".app-shell").inert = false;
+  legalDocumentParentModal = null;
+  legalDocumentReturnFocus?.focus({ preventScroll: true });
+  legalDocumentReturnFocus = null;
+}
+
 async function confirmLegalConsent() {
   if (legalBusy) return;
   legalBusy = true;
@@ -1282,9 +1371,9 @@ function renderMealMode() {
   recordButton.hidden = false;
   title.textContent = isBefore ? "饭前先问问" : "饭后记一记";
   hint.textContent = isBefore ? "没听清可以打字，或改一改。" : "吃完可以补记，系统会顺手给下次建议。";
-  recordHint.textContent = isBefore ? "比如：“这碗热干面我能吃吗？”" : "比如：“我吃了半碗米饭、一个鸡蛋、一份青菜。”";
-  analyze.textContent = isBefore ? "帮我看看" : "帮我记录并判断";
-  text.placeholder = isBefore ? "这碗热干面我能吃吗？" : "我吃了半碗米饭、一个鸡蛋、一份青菜";
+  recordHint.textContent = isBefore ? "比如：“红烧鱼 1斤，我能吃吗？”" : "比如：“我吃了半碗米饭、1个鸡蛋、200克青菜。”";
+  analyze.textContent = isBefore ? "按这段文字分析" : "按这段文字记录并判断";
+  text.placeholder = isBefore ? "例如：红烧鱼 1斤" : "例如：半碗米饭、1个鸡蛋、200克青菜";
   if (!listening) $("#recordLabel").textContent = "点一下，开口说";
   if (!canRecognizeSpeech) {
     recordHint.textContent = "当前测试地址不是安全连接，接入 HTTPS 后即可使用麦克风。文字输入仅作备用。";
@@ -1538,10 +1627,14 @@ function renderProfileInsights() {
         <span>了解家庭绑定状态</span>
         <strong>›</strong>
       </button>
-      <a class="settings-link" href="/privacy.html" target="_blank" rel="noopener">
-        <span>隐私政策与用户协议</span>
+      <button class="settings-link" type="button" data-legal-document="privacy">
+        <span>隐私政策</span>
         <strong>›</strong>
-      </a>
+      </button>
+      <button class="settings-link" type="button" data-legal-document="terms">
+        <span>用户协议</span>
+        <strong>›</strong>
+      </button>
       <button class="settings-link" type="button" data-account-data>
         <span>导出数据或删除账号</span>
         <strong>›</strong>
@@ -1559,6 +1652,13 @@ function applyBmiMeterPosition() {
 }
 
 function bindProfileSettingEvents() {
+  $$("#profileInsights [data-legal-document]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void openLegalDocument(button.dataset.legalDocument);
+    });
+  });
   $$("[data-font-size]").forEach((button) => {
     button.addEventListener("click", (event) => {
       event.preventDefault();
@@ -1904,7 +2004,7 @@ async function finishServerSpeechRecording(blob, failureMessage = "") {
   recordedAudioChunks = [];
   if (!blob || blob.size < 256) {
     renderMealMode();
-    $("#voiceResult").innerHTML = renderResultCard("yellow", "没有听清", failureMessage || "录音太短，请靠近手机再说一次。 ");
+    renderVoiceManualFallback("没有听清", failureMessage || "录音太短，请直接填写饭菜和重量。");
     return;
   }
   $("#recordLabel").textContent = "正在识别，请稍等";
@@ -1916,7 +2016,7 @@ async function finishServerSpeechRecording(blob, failureMessage = "") {
     await analyzeVoiceMeal();
   } catch (error) {
     renderMealMode();
-    $("#voiceResult").innerHTML = renderResultCard("yellow", "没有听清", error?.message || "语音识别暂时没有完成，请再说一次。 ");
+    renderVoiceManualFallback("没有听清", error?.message || "语音识别暂时没有完成，请直接填写。");
   }
 }
 
@@ -1962,7 +2062,7 @@ function startBrowserSpeechRecognition(SpeechRecognition) {
       : event.error === "no-speech"
         ? "没有听清楚，请靠近手机再说一次"
         : "语音识别暂时不稳定，可直接修改文字后判断";
-    $("#voiceResult").innerHTML = renderResultCard("yellow", "请再说一次", message);
+    renderVoiceManualFallback("没有听清", message);
     showToast(message);
   };
   try {
@@ -1970,7 +2070,7 @@ function startBrowserSpeechRecognition(SpeechRecognition) {
     scheduleSpeechStop(5000);
   } catch {
     resetSpeechUi();
-    $("#voiceResult").innerHTML = renderResultCard("yellow", "语音暂时不可用", "请直接修改文字后点“马上判断”。");
+    renderVoiceManualFallback("语音暂时不可用", "请直接填写饭菜和重量。");
   }
 }
 
@@ -1993,6 +2093,16 @@ function resetSpeechUi() {
   renderMealMode();
 }
 
+function renderVoiceManualFallback(title, message) {
+  $("#voiceResult").innerHTML = `
+    ${renderResultCard("yellow", title, message)}
+    <div class="recovery-actions">
+      <button class="primary-button" type="button" data-focus-voice-text>自己填写饭菜</button>
+    </div>
+  `;
+  scrollResultIntoView("#voiceResult");
+}
+
 async function analyzeVoiceMeal() {
   const text = $("#voiceText").value.trim();
   const localParsed = parseMealText(text);
@@ -2000,24 +2110,39 @@ async function analyzeVoiceMeal() {
     renderUnclearResult("#voiceResult", "voice", true, localParsed);
     return;
   }
-  if (localParsed.status !== "food" && serviceStatus.textModelAvailable) {
+  if (serviceStatus.textModelAvailable) {
     const button = $("#voiceAnalyze");
     button.disabled = true;
     button.setAttribute("aria-busy", "true");
-    $("#voiceResult").innerHTML = renderResultCard("yellow", "正在分析", "正在识别您输入的饭菜，请稍等。 ");
+    $("#voiceResult").innerHTML = renderResultCard("yellow", "正在分析", "正在按您最终填写的文字分析。");
     try {
       const aiResult = await requestAiMealAnalysis(text);
       const normalized = normalizeAiMealAnalysis(aiResult, localParsed);
       if (normalized.status === "food" && normalized.items.length) {
-        renderVoiceConfirmation({ status: "food", items: normalized.items, originalText: text });
-        showToast("识别好了，请确认食物和份量");
+        const exactItems = localParsed.status === "food" && localParsed.items.length
+          ? localParsed.items
+          : normalized.items;
+        renderVoiceConfirmation({
+          status: "food",
+          items: exactItems,
+          originalText: text,
+          evaluation: normalizeAiEvaluation(aiResult, exactItems, localParsed),
+        });
+        showToast("已按填写的内容分析，请确认重量");
+        return;
+      }
+      if (localParsed.status === "food") {
+        renderVoiceConfirmation(localParsed);
+        showToast("已按填写的内容进行本地判断");
         return;
       }
       renderUnclearResult("#voiceResult", "voice", true, normalized);
       return;
     } catch {
-      renderUnclearResult("#voiceResult", "voice", true, localParsed);
-      return;
+      if (localParsed.status !== "food") {
+        renderUnclearResult("#voiceResult", "voice", true, localParsed);
+        return;
+      }
     } finally {
       button.disabled = false;
       button.removeAttribute("aria-busy");
@@ -2041,6 +2166,7 @@ function renderVoiceConfirmation(parsed, announce = true) {
     mode: state.mealMode === "after" ? "after" : "before",
     originalText: normalized.originalText || $("#voiceText").value.trim(),
     items: dedupeFoodMatches(normalized.items).map(normalizePendingFoodItem),
+    evaluation: normalized.evaluation || null,
   };
   renderPendingMealControls();
   $("#voiceResult").innerHTML = "";
@@ -2049,21 +2175,26 @@ function renderVoiceConfirmation(parsed, announce = true) {
 }
 
 function normalizePendingFoodItem(item) {
-  const option = getPortionOptionFromItem(item);
+  const measurement = getPortionMeasurementFromItem(item);
   return {
     ...item,
-    portionSize: option.id,
-    portion: option.label,
-    portionFactor: option.factor,
+    portionValue: measurement.value,
+    portionUnit: measurement.unit,
+    portion: formatPortionMeasurement(measurement.value, measurement.unit),
+    portionFactor: calculatePortionFactor(measurement.value, measurement.unit),
   };
 }
 
-function getPortionOptionFromItem(item = {}) {
+function getPortionMeasurementFromItem(item = {}) {
+  const parsed = parsePortionMeasurement(item.portion);
+  if (parsed) return parsed;
+  const grams = Number(item.estimatedGrams || 0);
+  if (Number.isFinite(grams) && grams > 0) return { value: normalizePortionValue(grams), unit: "克" };
   const text = `${item.portion || ""} ${item.name || ""}`;
   const factor = Number(item.portionFactor || 1);
-  if (/半|小|少/.test(text) || factor < 0.85) return PORTION_OPTIONS[0];
-  if (/大|多|两|2/.test(text) || factor > 1.2) return PORTION_OPTIONS[2];
-  return PORTION_OPTIONS[1];
+  if (/半|小|少/.test(text) || factor < 0.85) return { value: 0.5, unit: "份" };
+  if (/大|多/.test(text) || factor > 1.2) return { value: 1.5, unit: "份" };
+  return { value: 1, unit: "份" };
 }
 
 function renderPendingMealControls() {
@@ -2077,12 +2208,12 @@ function renderPendingMealControls() {
   box.hidden = false;
   box.innerHTML = `
     <h3>${isBefore ? "听到了这些，对吗？" : "这顿饭是这些，对吗？"}</h3>
-    <p>${isBefore ? "点份量可以改大小，点 × 可以去掉。" : "确认后会记一餐，并给下次怎么吃的建议。"}</p>
+    <p>${isBefore ? "请核对食物、数量和单位，可填 1 份、200 克或 1 斤。" : "确认食物和实际重量后，再记录这一餐。"}</p>
     <div class="pending-food-list">
       ${pendingVoiceMeal.items.map((item, index) => renderPendingFoodChip(item, index)).join("")}
     </div>
     <div class="missing-food-row">
-      <input id="missingFoodInput" type="text" placeholder="漏了就补一个，如：青菜" />
+      <input id="missingFoodInput" name="meal-missing-food" type="text" inputmode="text" autocomplete="off" spellcheck="false" placeholder="漏了就补一个，如：青菜" />
       <button type="button" data-add-pending-food aria-label="添加漏掉的食物"><svg><use href="#i-plus"></use></svg></button>
     </div>
     <button class="primary-button" type="button" data-confirm-meal>${isBefore ? "对，帮我看看" : "对，帮我记录并判断"}</button>
@@ -2091,10 +2222,13 @@ function renderPendingMealControls() {
 }
 
 function bindPendingMealControls() {
-  $$("[data-portion-select]").forEach((select) => {
-    select.addEventListener("change", (event) => {
+  $$("[data-portion-value], [data-portion-unit]").forEach((control) => {
+    control.addEventListener("change", (event) => {
       event.stopPropagation();
-      updatePendingPortion(select.dataset.portionSelect, select.value);
+      const index = control.dataset.portionValue ?? control.dataset.portionUnit;
+      const value = $(`[data-portion-value="${index}"]`)?.value;
+      const unit = $(`[data-portion-unit="${index}"]`)?.value;
+      updatePendingPortion(index, value, unit);
     });
   });
   $$("[data-remove-pending-food]").forEach((button) => {
@@ -2121,30 +2255,40 @@ function bindPendingMealControls() {
 }
 
 function renderPendingFoodChip(item, index) {
+  const value = normalizePortionValue(item.portionValue || 1);
+  const unit = PORTION_UNIT_OPTIONS.includes(item.portionUnit) ? item.portionUnit : "份";
   return `
     <div class="pending-food-chip">
-      <strong>${escapeHtml(item.name)}</strong>
-      <label>
-        <span>份量</span>
-        <select data-portion-select="${index}" aria-label="修改${escapeHtml(item.name)}份量">
-          ${PORTION_OPTIONS.map((option) => `
-            <option value="${option.id}" ${item.portionSize === option.id ? "selected" : ""}>${option.label}</option>
-          `).join("")}
-        </select>
-      </label>
-      <button type="button" data-remove-pending-food="${index}" aria-label="删除${escapeHtml(item.name)}"><svg><use href="#i-close"></use></svg></button>
+      <div class="pending-food-head">
+        <strong>${escapeHtml(item.name)}</strong>
+        <button type="button" data-remove-pending-food="${index}" aria-label="删除${escapeHtml(item.name)}"><svg><use href="#i-close"></use></svg></button>
+      </div>
+      <div class="portion-editor">
+        <label>
+          <span>数量</span>
+          <input data-portion-value="${index}" type="number" min="0.1" max="2000" step="0.1" inputmode="decimal" value="${value}" aria-label="${escapeHtml(item.name)}数量" />
+        </label>
+        <label>
+          <span>单位</span>
+          <select data-portion-unit="${index}" aria-label="${escapeHtml(item.name)}单位">
+            ${PORTION_UNIT_OPTIONS.map((option) => `<option value="${option}" ${unit === option ? "selected" : ""}>${option}</option>`).join("")}
+          </select>
+        </label>
+      </div>
     </div>
   `;
 }
 
-function updatePendingPortion(index, size) {
+function updatePendingPortion(index, rawValue, rawUnit) {
   if (!pendingVoiceMeal?.items[index]) return;
-  const option = PORTION_OPTIONS.find((item) => item.id === size) || PORTION_OPTIONS[1];
+  const value = normalizePortionValue(rawValue);
+  const unit = PORTION_UNIT_OPTIONS.includes(rawUnit) ? rawUnit : "份";
   pendingVoiceMeal.items[index] = {
     ...pendingVoiceMeal.items[index],
-    portionSize: option.id,
-    portion: option.label,
-    portionFactor: option.factor,
+    portionValue: value,
+    portionUnit: unit,
+    portion: formatPortionMeasurement(value, unit),
+    portionFactor: calculatePortionFactor(value, unit),
   };
   renderPendingMealControls();
 }
@@ -2165,7 +2309,7 @@ function addPendingFood() {
   const parsed = parseMealText(value);
   const items = parsed.status === "food" && parsed.items.length
     ? parsed.items
-    : [{ name: value, salt: 0.5, carb: "中", tags: [], portion: "中份", portionFactor: 1, source: "manual" }];
+    : [{ name: value, salt: 0.5, carb: "中", tags: [], portion: "1份", portionFactor: 1, source: "manual" }];
   if (!pendingVoiceMeal) pendingVoiceMeal = { mode: state.mealMode, originalText: value, items: [] };
   pendingVoiceMeal.items = dedupeFoodMatches([...pendingVoiceMeal.items, ...items.map(normalizePendingFoodItem)]);
   pendingVoiceMeal.originalText = `${pendingVoiceMeal.originalText || ""} ${value}`.trim();
@@ -2173,17 +2317,47 @@ function addPendingFood() {
   showToast("已补上这道菜");
 }
 
-function confirmPendingMeal() {
+async function confirmPendingMeal() {
   if (!pendingVoiceMeal?.items.length) {
     showToast("请先说出或输入饭菜");
     return;
   }
+  const confirmButtons = $$('[data-confirm-meal]');
+  const finalText = pendingVoiceMeal.items
+    .map((item) => `${item.name} ${item.portion}`)
+    .join("、");
   const parsed = {
     status: "food",
     items: pendingVoiceMeal.items,
-    originalText: pendingVoiceMeal.originalText,
+    originalText: finalText,
   };
-  const evaluation = evaluateMeal(parsed.items, parsed);
+  const localEvaluation = evaluateMeal(parsed.items, parsed);
+  let modelEvaluation = pendingVoiceMeal.evaluation;
+  if (serviceStatus.textModelAvailable) {
+    confirmButtons.forEach((button) => {
+      button.disabled = true;
+      button.setAttribute("aria-busy", "true");
+      button.dataset.originalLabel ||= button.textContent;
+      button.textContent = "正在按最终重量分析…";
+    });
+    try {
+      const modelResult = await requestAiMealAnalysis(finalText);
+      if (normalizeAiStatus(modelResult.status) === "food" || hasAiEvaluation(modelResult)) {
+        modelEvaluation = normalizeAiEvaluation(modelResult, parsed.items, parsed);
+      }
+    } catch {
+      showToast("模型暂时未响应，已按您确认的饭菜和重量本地判断");
+    } finally {
+      confirmButtons.forEach((button) => {
+        button.disabled = false;
+        button.removeAttribute("aria-busy");
+        button.textContent = button.dataset.originalLabel || "确认";
+      });
+    }
+  }
+  const evaluation = modelEvaluation && riskRank(modelEvaluation.level) >= riskRank(localEvaluation.level)
+    ? modelEvaluation
+    : localEvaluation;
   showMealResultModal(evaluation, parsed.items, "voice", pendingVoiceMeal.mode);
 }
 
@@ -2451,7 +2625,13 @@ function normalizeMealInput(input, source = "meal") {
   if (Array.isArray(input)) return { status: input.length ? "food" : "unclear", items: input, originalText: "", reason: "" };
   if (input && typeof input === "object") {
     const items = Array.isArray(input.items) ? input.items : [];
-    return { status: input.status || (items.length ? "food" : "unclear"), items, originalText: input.originalText || "", reason: input.reason || "" };
+    return {
+      status: input.status || (items.length ? "food" : "unclear"),
+      items,
+      originalText: input.originalText || "",
+      reason: input.reason || "",
+      evaluation: input.evaluation || null,
+    };
   }
   return parseMealText(String(input || ""));
 }
@@ -2940,6 +3120,18 @@ function inferPortion(text, foodName) {
   const normalized = normalizeFoodText(text);
   const entry = FOOD_ALIASES.find((item) => item.food === foodName);
   const terms = [foodName, ...(entry?.terms || [])].map(normalizeFoodText);
+  const quantity = "(\\d+(?:\\.\\d+)?|半|一|二|两|三|四|五)";
+  const unit = "(斤|克|两|份|碗|个|杯)";
+  for (const term of terms) {
+    const escapedTerm = escapeRegularExpression(term);
+    const before = normalized.match(new RegExp(`${quantity}${unit}${escapedTerm}`));
+    const after = normalized.match(new RegExp(`${escapedTerm}${quantity}${unit}`));
+    const match = before || after;
+    if (match) {
+      const parsed = parsePortionMeasurement(`${match[1]}${match[2]}`);
+      if (parsed) return formatPortionMeasurement(parsed.value, parsed.unit);
+    }
+  }
   const portions = ["半碗", "一碗", "两碗", "半杯", "一杯", "一份", "两份", "一个", "两个", "少量", "几口"];
   const hit = portions.find((portion) => {
     const normalizedPortion = normalizeFoodText(portion);
@@ -2957,12 +3149,48 @@ function inferPortion(text, foodName) {
 
 function inferPortionFactor(portion) {
   if (!portion) return 1;
+  const measurement = parsePortionMeasurement(portion);
+  if (measurement) return calculatePortionFactor(measurement.value, measurement.unit);
   if (portion.includes("半")) return 0.5;
   if (portion.includes("两") || portion.includes("二")) return 2;
   if (portion.includes("三")) return 3;
   if (portion.includes("少量") || portion.includes("几口")) return 0.35;
   if (portion.includes("大")) return 1.35;
   return 1;
+}
+
+function parsePortionMeasurement(portion) {
+  const match = String(portion || "").replace(/\s+/g, "").match(/(\d+(?:\.\d+)?|半|一|二|两|三|四|五)(斤|克|两|份|碗|个|杯)/);
+  if (!match) return null;
+  const chineseValues = { 半: 0.5, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5 };
+  const value = chineseValues[match[1]] ?? Number(match[1]);
+  if (!Number.isFinite(value) || value <= 0) return null;
+  return { value: normalizePortionValue(value), unit: match[2] };
+}
+
+function normalizePortionValue(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return 1;
+  return Math.round(Math.min(2000, Math.max(0.1, number)) * 100) / 100;
+}
+
+function formatPortionMeasurement(value, unit) {
+  const normalizedValue = normalizePortionValue(value);
+  const normalizedUnit = PORTION_UNIT_OPTIONS.includes(unit) ? unit : "份";
+  return `${normalizedValue}${normalizedUnit}`;
+}
+
+function calculatePortionFactor(value, unit) {
+  const amount = normalizePortionValue(value);
+  let factor = amount;
+  if (unit === "克") factor = amount / 300;
+  if (unit === "两") factor = amount / 6;
+  if (unit === "斤") factor = amount * (500 / 300);
+  return Math.min(5, Math.max(0.1, factor));
+}
+
+function escapeRegularExpression(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function looksLikeMealText(normalized) {
@@ -3079,7 +3307,10 @@ function renderUnclearResult(selector, source, speak, parsed = {}) {
     title = "请先输入吃了什么";
     text = parsed.reason;
   }
-  $(selector).innerHTML = `${renderResultCard("yellow", title, text)}${speak ? renderSpeechControl() : ""}`;
+  const manualEntry = source === "voice"
+    ? '<div class="recovery-actions"><button class="primary-button" type="button" data-focus-voice-text>自己填写饭菜</button></div>'
+    : "";
+  $(selector).innerHTML = `${renderResultCard("yellow", title, text)}${manualEntry}${speak ? renderSpeechControl() : ""}`;
   scrollResultIntoView(selector);
   if (speak) speakResult(`${title}。${text}`);
 }
